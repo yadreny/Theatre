@@ -7,12 +7,17 @@ namespace AlSo
 {
     [TrackColor(0.95f, 0.55f, 0.35f)]
     [TrackClipType(typeof(LocomotionActionClip))]
-    [TrackBindingType(typeof(LocomotionProfileTest))]
     public class LocomotionActionTrack : TrackAsset
     {
         public override Playable CreateTrackMixer(PlayableGraph graph, GameObject go, int inputCount)
         {
-            return ScriptPlayable<LocomotionActionMixerBehaviour>.Create(graph, inputCount);
+            var playable = ScriptPlayable<LocomotionActionMixerBehaviour>.Create(graph, inputCount);
+            var b = playable.GetBehaviour();
+
+            b.Director = go != null ? go.GetComponent<PlayableDirector>() : null;
+            b.SelfTrack = this;
+
+            return playable;
         }
     }
 
@@ -31,7 +36,6 @@ namespace AlSo
         [Header("Time remap (0..1 -> 0..1)")]
         public AnimationCurve normalizedTimeCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
 
-        // фиксируем длину таймлайн-клипа по длине ассетного клипа
         public override double duration
         {
             get
@@ -47,13 +51,10 @@ namespace AlSo
                     return 0.0;
                 }
 
-                // маленький clamp чтобы не было “нулевой длительности” из-за импорта
                 return Math.Max(0.000001, len);
             }
         }
 
-        // капсы: разрешаем blending, но запрещаем ClipIn и SpeedMultiplier,
-        // чтобы таймлайн не мог “растянуть” или “сдвинуть” экшен по времени.
         public ClipCaps clipCaps => ClipCaps.Blending;
 
         public override Playable CreatePlayable(PlayableGraph graph, GameObject owner)
@@ -80,16 +81,21 @@ namespace AlSo
 
     public class LocomotionActionMixerBehaviour : PlayableBehaviour
     {
+        public PlayableDirector Director;
+        public TrackAsset SelfTrack;
+
+        private Transform _targetTransform;
+        private LocomotionProfileTest _locomotionTest;
+
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
-            var locomotionTest = playerData as LocomotionProfileTest;
-            if (locomotionTest == null)
+            if (!TryResolveTarget())
             {
                 return;
             }
 
-            locomotionTest.EnsureLocomotionCreated();
-            var loco = locomotionTest.Locomotion;
+            _locomotionTest.EnsureLocomotionCreated();
+            var loco = _locomotionTest.Locomotion;
             if (loco == null)
             {
                 return;
@@ -136,7 +142,7 @@ namespace AlSo
                 }
             }
 
-            locomotionTest.SetTimelineDriven(anyActive);
+            _locomotionTest.SetTimelineDriven(anyActive);
 
             if (!anyActive || bestB == null || bestW <= eps)
             {
@@ -152,7 +158,7 @@ namespace AlSo
 
             if (bestB.SetSpeedZero)
             {
-                locomotionTest.debugSpeed = Vector2.zero;
+                _locomotionTest.debugSpeed = Vector2.zero;
                 loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
 
@@ -173,7 +179,6 @@ namespace AlSo
             if (!Application.isPlaying)
             {
                 loco.UpdateLocomotion(Vector2.zero, 0f);
-
                 loco.PreviewAction(bestB.Action, localTimeSeconds, bestW);
                 loco.EvaluateGraph(0f);
                 return;
@@ -186,6 +191,70 @@ namespace AlSo
                 loco.EvaluateGraph(0f);
                 return;
             }
+        }
+
+        private bool TryResolveTarget()
+        {
+            if (_targetTransform != null && _locomotionTest != null)
+            {
+                return true;
+            }
+
+            if (Director == null || SelfTrack == null)
+            {
+                return false;
+            }
+
+            LocomotionActorBindingTrack bindTrack = FindActorBindingTrack(SelfTrack);
+            if (bindTrack == null)
+            {
+                return false;
+            }
+
+            _targetTransform = Director.GetGenericBinding(bindTrack) as Transform;
+            if (_targetTransform == null)
+            {
+                return false;
+            }
+
+            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
+            if (_locomotionTest == null)
+            {
+                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
+            }
+
+            return _locomotionTest != null;
+        }
+
+        private static LocomotionActorBindingTrack FindActorBindingTrack(TrackAsset anyTrackInGroup)
+        {
+            TrackAsset parent = anyTrackInGroup != null ? anyTrackInGroup.parent as TrackAsset : null;
+
+            while (parent != null && parent is not GroupTrack)
+            {
+                parent = parent.parent as TrackAsset;
+            }
+
+            if (parent == null)
+            {
+                return null;
+            }
+
+            foreach (TrackAsset child in parent.GetChildTracks())
+            {
+                if (child is LocomotionActorBindingTrack bt)
+                {
+                    return bt;
+                }
+            }
+
+            return null;
+        }
+
+        public override void OnPlayableDestroy(Playable playable)
+        {
+            _targetTransform = null;
+            _locomotionTest = null;
         }
     }
 }

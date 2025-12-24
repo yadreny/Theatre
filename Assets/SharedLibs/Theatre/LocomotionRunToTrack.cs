@@ -7,12 +7,17 @@ namespace AlSo
 {
     [TrackColor(0.35f, 0.75f, 0.95f)]
     [TrackClipType(typeof(LocomotionRunToClip))]
-    [TrackBindingType(typeof(LocomotionProfileTest))]
     public class LocomotionRunToTrack : TrackAsset
     {
         public override Playable CreateTrackMixer(PlayableGraph graph, GameObject go, int inputCount)
         {
-            return ScriptPlayable<LocomotionRunToMixerBehaviour>.Create(graph, inputCount);
+            var playable = ScriptPlayable<LocomotionRunToMixerBehaviour>.Create(graph, inputCount);
+            var b = playable.GetBehaviour();
+
+            b.Director = go != null ? go.GetComponent<PlayableDirector>() : null;
+            b.SelfTrack = this;
+
+            return playable;
         }
     }
 
@@ -75,26 +80,29 @@ namespace AlSo
 
     public class LocomotionRunToMixerBehaviour : PlayableBehaviour
     {
+        public PlayableDirector Director;
+        public TrackAsset SelfTrack;
+
+        private Transform _targetTransform;
+        private LocomotionProfileTest _locomotionTest;
+
         private bool _cached;
         private Vector3 _basePos;
         private Quaternion _baseRot;
 
-        // FIX: чтобы на WrapMode=Hold (и вообще когда playhead стоит на месте) не “шёл на месте”
         private bool _hasPrevTime;
         private double _prevTrackTime;
 
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
-            var locomotionTest = playerData as LocomotionProfileTest;
-            if (locomotionTest == null)
+            if (!TryResolveTarget())
             {
                 return;
             }
 
-            // Важно для скраба: гарантируем наличие LocomotionSystem в Edit Mode
-            locomotionTest.EnsureLocomotionCreated();
+            _locomotionTest.EnsureLocomotionCreated();
 
-            var tr = locomotionTest.transform;
+            var tr = _targetTransform;
 
             if (!_cached)
             {
@@ -124,16 +132,22 @@ namespace AlSo
             {
                 float w = playable.GetInputWeight(i);
                 if (w <= eps)
+                {
                     continue;
+                }
 
                 var input = playable.GetInput(i);
                 if (!input.IsValid() || input.GetPlayableType() != typeof(LocomotionRunToBehaviour))
+                {
                     continue;
+                }
 
                 var sp = (ScriptPlayable<LocomotionRunToBehaviour>)input;
                 var b = sp.GetBehaviour();
                 if (b == null || b.To == null)
+                {
                     continue;
+                }
 
                 double dur = sp.GetDuration();
                 double t = sp.GetTime();
@@ -142,7 +156,9 @@ namespace AlSo
                 nt = Mathf.Clamp01(nt);
 
                 if (b.Curve != null && b.Curve.length > 0)
+                {
                     nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
+                }
 
                 Vector3 fromPos = b.From != null ? b.From.position : _basePos;
                 Quaternion fromRot = b.From != null ? b.From.rotation : _baseRot;
@@ -150,7 +166,6 @@ namespace AlSo
                 Vector3 toPos = b.To.position;
                 Quaternion toRot = b.To.rotation;
 
-                // --- pose ---
                 Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
                 Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
 
@@ -178,22 +193,20 @@ namespace AlSo
                     }
                 }
 
-                // --- speed from trajectory derivative (scrub-friendly) ---
                 Vector2 speed = ComputeSpeedVector2(tr, fromPos, toPos, sp, b);
-
                 speedAcc += speed * w;
                 anySpeed = true;
 
                 sumW += w;
             }
 
-            // Если нет активных клипов — вернём позу и отдадим 0-скорость
+            _locomotionTest.SetTimelineDriven(sumW > eps);
+
             if (sumW <= eps)
             {
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
-                    // Откатываем только если реально ушли в начало (иначе мешает Hold’у)
                     if (trackTime <= 0.0001)
                     {
                         tr.position = _basePos;
@@ -202,7 +215,7 @@ namespace AlSo
                 }
 #endif
 
-                var loco0 = locomotionTest.Locomotion;
+                var loco0 = _locomotionTest.Locomotion;
                 if (loco0 != null)
                 {
                     loco0.SetAbsoluteTime(trackTime);
@@ -246,8 +259,6 @@ namespace AlSo
 #if UNITY_EDITOR
             if (!Application.isPlaying)
             {
-                // FIX: если playhead стоит на месте (Hold / пауза / просто не проигрываем),
-                // скорость = 0, чтобы ноги не "шли на месте".
                 if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
                 {
                     finalSpeed = Vector2.zero;
@@ -258,21 +269,84 @@ namespace AlSo
             }
 #endif
 
-            var loco = locomotionTest.Locomotion;
+            var loco = _locomotionTest.Locomotion;
             if (loco != null)
             {
-                // ВАЖНО: сначала выставляем время клипов, потом UpdateLocomotion (он сэмплит кривые ног/hip)
                 loco.SetAbsoluteTime(trackTime);
                 loco.UpdateLocomotion(finalSpeed);
 
 #if UNITY_EDITOR
-                // В Edit Mode Unity сама не тикает твой отдельный PlayableGraph — проталкиваем руками
                 if (!Application.isPlaying)
                 {
                     loco.EvaluateGraph(0f);
                 }
 #endif
             }
+        }
+
+        private bool TryResolveTarget()
+        {
+            if (_targetTransform != null && _locomotionTest != null)
+            {
+                return true;
+            }
+
+            if (Director == null || SelfTrack == null)
+            {
+                return false;
+            }
+
+            LocomotionActorBindingTrack bindTrack = FindActorBindingTrack(SelfTrack);
+            if (bindTrack == null)
+            {
+                return false;
+            }
+
+            _targetTransform = Director.GetGenericBinding(bindTrack) as Transform;
+            if (_targetTransform == null)
+            {
+                return false;
+            }
+
+            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
+            if (_locomotionTest == null)
+            {
+                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
+            }
+
+            if (_locomotionTest == null)
+            {
+                return false;
+            }
+
+            _cached = false;
+            _hasPrevTime = false;
+            return true;
+        }
+
+        private static LocomotionActorBindingTrack FindActorBindingTrack(TrackAsset anyTrackInGroup)
+        {
+            TrackAsset parent = anyTrackInGroup != null ? anyTrackInGroup.parent as TrackAsset : null;
+
+            while (parent != null && parent is not GroupTrack)
+            {
+                parent = parent.parent as TrackAsset;
+            }
+
+            if (parent == null)
+            {
+                return null;
+            }
+
+            foreach (TrackAsset child in parent.GetChildTracks())
+            {
+                if (child is LocomotionActorBindingTrack bt)
+                {
+                    return bt;
+                }
+            }
+
+            return null;
         }
 
         private static Vector2 ComputeSpeedVector2(
@@ -284,17 +358,19 @@ namespace AlSo
         {
             const float eps = 1e-6f;
 
-            double durD = clipPlayable.GetDuration();
-            float dur = (float)durD;
+            float dur = (float)clipPlayable.GetDuration();
             float t = (float)clipPlayable.GetTime();
 
             if (dur <= eps)
+            {
                 return Vector2.zero;
+            }
 
-            // стабильный дифференциал даже при scrubbing (deltaTime может быть 0)
             float h = Mathf.Min(1f / 60f, dur * 0.1f);
             if (h <= eps)
+            {
                 h = 1f / 60f;
+            }
 
             float t0 = Mathf.Clamp(t - h, 0f, dur);
             float t1 = Mathf.Clamp(t + h, 0f, dur);
@@ -314,7 +390,6 @@ namespace AlSo
             float dt = Mathf.Max(eps, (t1 - t0));
             Vector3 vWorld = (p1 - p0) / dt;
 
-            // в локаль персонажа → Vector2(x,z)
             Vector3 vLocal3 = character.InverseTransformDirection(vWorld);
             Vector2 vLocal = new Vector2(vLocal3.x, vLocal3.z);
 
@@ -322,16 +397,19 @@ namespace AlSo
             float mag01 = Mathf.Clamp01(worldPlanarSpeed / Mathf.Max(0.0001f, b.FullSpeedMps));
 
             if (vLocal.sqrMagnitude <= 1e-10f)
+            {
                 return Vector2.zero;
+            }
 
-            Vector2 dir = vLocal.normalized;
-            return dir * (mag01 * b.SpeedMultiplier);
+            return vLocal.normalized * (mag01 * b.SpeedMultiplier);
         }
 
         public override void OnPlayableDestroy(Playable playable)
         {
             _cached = false;
             _hasPrevTime = false;
+            _targetTransform = null;
+            _locomotionTest = null;
         }
     }
 }
