@@ -21,7 +21,7 @@ MonoBehaviour:
     PrefabModificationsReferencedUnityObjects: []
     PrefabModifications: []
     SerializationNodes: []
-  _clip: {fileID: 7400000, guid: a540d828187ac6040965ae2920fbb9f8, type: 2}
+  _clip: {fileID: 7400000, guid: ddcb764f60bb5fc4aa061b46266101f3, type: 2}
   _leftFootMagnet:
     serializedVersion: 2
     m_Curve:

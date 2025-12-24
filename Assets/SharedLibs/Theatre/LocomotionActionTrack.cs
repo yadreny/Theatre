@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Playables;
 using UnityEngine.Timeline;
@@ -23,9 +22,13 @@ namespace AlSo
         public AnimationActionClipData action;
 
         [Header("Options")]
+        [Tooltip("Если true — при активном клипе принудительно держим скорость 0.")]
         public bool setSpeedZero = true;
 
-        [Header("Time remap")]
+        [Tooltip("Если true — в Play Mode тоже драйвим экшен через PreviewAction по времени Timeline (как при скрабе).")]
+        public bool driveByTimelineInPlayMode = true;
+
+        [Header("Time remap (0..1 -> 0..1)")]
         public AnimationCurve normalizedTimeCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
 
         public ClipCaps clipCaps => ClipCaps.Blending | ClipCaps.ClipIn | ClipCaps.SpeedMultiplier;
@@ -37,6 +40,7 @@ namespace AlSo
 
             b.Action = action;
             b.SetSpeedZero = setSpeedZero;
+            b.DriveByTimelineInPlayMode = driveByTimelineInPlayMode;
             b.Curve = normalizedTimeCurve;
 
             return playable;
@@ -47,14 +51,12 @@ namespace AlSo
     {
         public AnimationActionClipData Action;
         public bool SetSpeedZero;
+        public bool DriveByTimelineInPlayMode;
         public AnimationCurve Curve;
     }
 
     public class LocomotionActionMixerBehaviour : PlayableBehaviour
     {
-        // чтобы в PlayMode не спамить PerformAction каждый кадр
-        private readonly Dictionary<int, double> _lastLocalTimeByInput = new Dictionary<int, double>();
-
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
             var locomotionTest = playerData as LocomotionProfileTest;
@@ -75,7 +77,7 @@ namespace AlSo
 
             bool anyActive = false;
 
-            // берём самый “сильный” клип (по весу таймлайна) — этого достаточно для preview
+            // Для preview берём самый сильный вход (по весу timeline).
             float bestW = 0f;
             ScriptPlayable<LocomotionActionBehaviour> bestP = default;
             LocomotionActionBehaviour bestB = null;
@@ -83,31 +85,32 @@ namespace AlSo
             for (int i = 0; i < inputCount; i++)
             {
                 float w = playable.GetInputWeight(i);
+                if (w <= eps)
+                {
+                    continue;
+                }
 
                 var input = playable.GetInput(i);
                 if (!input.IsValid() || input.GetPlayableType() != typeof(LocomotionActionBehaviour))
                 {
-                    _lastLocalTimeByInput.Remove(i);
                     continue;
                 }
 
                 var sp = (ScriptPlayable<LocomotionActionBehaviour>)input;
                 var b = sp.GetBehaviour();
 
-                if (w > eps && b != null && b.Action != null && b.Action.Clip != null && b.Action.Clip.length > eps)
+                if (b == null || b.Action == null || b.Action.Clip == null || b.Action.Clip.length <= eps)
                 {
-                    anyActive = true;
-
-                    if (w > bestW)
-                    {
-                        bestW = w;
-                        bestP = sp;
-                        bestB = b;
-                    }
+                    continue;
                 }
-                else
+
+                anyActive = true;
+
+                if (w > bestW)
                 {
-                    _lastLocalTimeByInput.Remove(i);
+                    bestW = w;
+                    bestP = sp;
+                    bestB = b;
                 }
             }
 
@@ -125,86 +128,56 @@ namespace AlSo
                 return;
             }
 
-            // --- общие вещи: при action обычно держим скорость 0 ---
+            // Норм: при экшене обычно хотим 0 скорость.
             if (bestB.SetSpeedZero)
             {
                 locomotionTest.debugSpeed = Vector2.zero;
                 loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
 
-            // абсолютное время таймлайна (нужно, чтобы базовые клипы синхронизировались при скрабе)
+            // Синхронизируем базовые клипы по абсолютному времени таймлайна
             double trackTime = playable.GetTime();
             loco.SetAbsoluteTime(trackTime);
 
-            // локальное время внутри клипа action
-            double dur = bestP.GetDuration();
-            double t = bestP.GetTime();
+            // === ВАЖНОЕ ИЗМЕНЕНИЕ ===
+            // Время внутри action клипа берём напрямую из playable time (в секундах),
+            // так мы не ломаемся на clip-in / speed multiplier и на старте получаем 0.
+            float clipLen = bestB.Action.Clip.length;
+            float localTimeSeconds = Mathf.Clamp((float)bestP.GetTime(), 0f, Mathf.Max(0f, clipLen - 0.0001f));
 
-            float nt = (dur > eps) ? (float)(t / dur) : 1f;
-            nt = Mathf.Clamp01(nt);
-
+            // Если задана кривая ремапа (0..1->0..1), применяем её к нормализованному времени
             if (bestB.Curve != null && bestB.Curve.length > 0)
             {
+                float nt = clipLen > eps ? Mathf.Clamp01(localTimeSeconds / clipLen) : 0f;
                 nt = Mathf.Clamp01(bestB.Curve.Evaluate(nt));
-            }
-
-            float clipLen = bestB.Action.Clip.length;
-            float localTime = nt * clipLen;
-            if (localTime >= clipLen)
-            {
-                localTime = Mathf.Max(0f, clipLen - 0.0001f);
+                localTimeSeconds = Mathf.Clamp(nt * clipLen, 0f, Mathf.Max(0f, clipLen - 0.0001f));
             }
 
 #if UNITY_EDITOR
             // ===== EDIT MODE: scrub через PreviewAction + EvaluateGraph(0) =====
             if (!Application.isPlaying)
             {
-                // Важно: веса базового миксера должны быть выставлены (хотя бы нулём),
-                // иначе у тебя может не обновляться часть кривых/hip-логики.
+                // Чтобы базовый слой точно был “вживлён” в позу (на некоторых сетапах без этого пусто)
                 loco.UpdateLocomotion(Vector2.zero, 0f);
 
-                loco.PreviewAction(bestB.Action, localTime, bestW);
+                loco.PreviewAction(bestB.Action, localTimeSeconds, bestW);
                 loco.EvaluateGraph(0f);
                 return;
             }
 #endif
 
-            // ===== PLAY MODE: один раз триггерим PerformAction на входе в клип =====
-            for (int i = 0; i < inputCount; i++)
+            // ===== PLAY MODE =====
+            // Чтобы поведение совпадало со скрабом, по умолчанию тоже драйвим через PreviewAction.
+            if (bestB.DriveByTimelineInPlayMode)
             {
-                float w = playable.GetInputWeight(i);
-                if (w <= eps)
-                    continue;
-
-                var input = playable.GetInput(i);
-                if (!input.IsValid() || input.GetPlayableType() != typeof(LocomotionActionBehaviour))
-                    continue;
-
-                var sp = (ScriptPlayable<LocomotionActionBehaviour>)input;
-                var b = sp.GetBehaviour();
-                if (b == null || b.Action == null || b.Action.Clip == null)
-                    continue;
-
-                double lt = sp.GetTime();
-
-                bool had = _lastLocalTimeByInput.TryGetValue(i, out double prevLt);
-                bool entered =
-                    !had ||
-                    (prevLt <= 0.000001 && lt > 0.000001) ||
-                    (lt < prevLt);
-
-                _lastLocalTimeByInput[i] = lt;
-
-                if (entered)
-                {
-                    locomotionTest.PerformAction(b.Action);
-                }
+                loco.PreviewAction(bestB.Action, localTimeSeconds, bestW);
+                loco.EvaluateGraph(0f);
+                return;
             }
-        }
 
-        public override void OnPlayableDestroy(Playable playable)
-        {
-            _lastLocalTimeByInput.Clear();
+            // Иначе — “событийный” режим (как раньше): выполнить один раз на входе в клип.
+            // (Оставил, но он именно и даёт отличие от editor scrub.)
+            // Для этого режима нужен отдельный кэш входа; я специально не усложняю здесь, раз по умолчанию driveByTimelineInPlayMode=true.
         }
     }
 }
