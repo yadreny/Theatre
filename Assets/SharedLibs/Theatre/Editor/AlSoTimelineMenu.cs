@@ -1,123 +1,149 @@
 ﻿#if UNITY_EDITOR
+using System;
 using UnityEditor;
 using UnityEditor.Timeline;
-using UnityEditor.Timeline.Actions;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.Playables;
 using UnityEngine.Timeline;
 
 namespace AlSo
 {
-    internal static class AlSoTimelineScaffold
+    public static class AlSoTimelineHierarchyCreateGroup
     {
-        public static bool TryCreateCharacterGroupFromSelection(string groupNameOverride = null)
+        [MenuItem("GameObject/AlSo/Timeline/Create Character Group (Actor+Move+Action)", false, 49)]
+        private static void Create(MenuCommand command)
         {
-            var timeline = TimelineEditor.inspectedAsset as TimelineAsset;
-            if (timeline == null)
+            Transform actor = Selection.activeTransform;
+            if (actor == null)
             {
-                // иногда TimelineEditor.inspectedAsset = null, но masterAsset есть
-                timeline = TimelineEditor.masterAsset as TimelineAsset;
+                UnityEngine.Debug.LogWarning("[AlSoTimeline] No active Transform selected.");
+                return;
             }
 
-            var director = TimelineEditor.inspectedDirector;
+            // Важно: при lock Timeline окна inspectedDirector остаётся стабильным.
+            PlayableDirector director = TimelineEditor.inspectedDirector ?? TimelineEditor.masterDirector;
             if (director == null)
             {
-                director = TimelineEditor.masterDirector;
+                UnityEngine.Debug.LogWarning("[AlSoTimeline] No inspected/master PlayableDirector. Open Timeline and lock it to a Director.");
+                return;
             }
 
+            TimelineAsset timeline = director.playableAsset as TimelineAsset;
             if (timeline == null)
             {
-                UnityEngine.Debug.LogWarning("[AlSoTimeline] No TimelineAsset is opened/inspected.");
-                return false;
+                UnityEngine.Debug.LogWarning("[AlSoTimeline] Director.playableAsset is not a TimelineAsset.");
+                return;
             }
 
-            // Проверка на read-only (частая причина “ничего не создаёт”)
-            string path = AssetDatabase.GetAssetPath(timeline);
-            if (!string.IsNullOrEmpty(path))
+            string timelinePath = AssetDatabase.GetAssetPath(timeline);
+            if (!string.IsNullOrEmpty(timelinePath) && !AssetDatabase.IsOpenForEdit(timeline))
             {
-                if (!AssetDatabase.IsOpenForEdit(timeline))
-                {
-                    UnityEngine.Debug.LogWarning($"[AlSoTimeline] TimelineAsset is not open for edit: {path}");
-                    return false;
-                }
+                UnityEngine.Debug.LogWarning($"[AlSoTimeline] TimelineAsset is not open for edit: {timelinePath}");
+                return;
             }
 
-            Transform actor = Selection.activeTransform;
-            string groupName = !string.IsNullOrEmpty(groupNameOverride)
-                ? groupNameOverride
-                : (actor != null ? actor.name : "Character");
+            string groupName = MakeUniqueGroupName(timeline, actor.name);
 
-            //TimelineUndo.PushUndo(timeline, "Create AlSo Character Group");
+            Undo.RegisterCompleteObjectUndo(timeline, "Create AlSo Character Group");
 
-            // 1) Group
+            // Group
             GroupTrack group = timeline.CreateTrack<GroupTrack>(null, groupName);
             group.name = groupName;
 
-            // 2) Actor binding track
-            var actorTrack = timeline.CreateTrack<LocomotionActorBindingTrack>(group, "Actor");
+            // Actor binding track (Transform)
+            LocomotionActorBindingTrack actorTrack = timeline.CreateTrack<LocomotionActorBindingTrack>(group, "Actor");
             actorTrack.name = "Actor";
 
-            // 3) Move / Action
-            var moveTrack = timeline.CreateTrack<LocomotionRunToTrack>(group, "Move");
+            // Move / Action tracks
+            LocomotionRunToTrack moveTrack = timeline.CreateTrack<LocomotionRunToTrack>(group, "Move");
             moveTrack.name = "Move";
 
-            var actionTrack = timeline.CreateTrack<LocomotionActionTrack>(group, "Action");
+            LocomotionActionTrack actionTrack = timeline.CreateTrack<LocomotionActionTrack>(group, "Action");
             actionTrack.name = "Action";
 
-            // 4) Bind actor track to selected transform
-            if (director != null && actor != null)
-            {
-                Undo.RecordObject(director, "Bind AlSo Actor Track");
-                director.SetGenericBinding(actorTrack, actor);
-                EditorUtility.SetDirty(director);
-            }
+            // Bind Actor track to selected Transform
+            Undo.RecordObject(director, "Bind AlSo Actor Track");
+            director.SetGenericBinding(actorTrack, actor);
 
+            EditorUtility.SetDirty(director);
             EditorUtility.SetDirty(timeline);
 
-            // Обновляем UI Timeline
-            TimelineEditor.Refresh(RefreshReason.ContentsModified | RefreshReason.WindowNeedsRedraw);
+            ForceTimelineRefreshNowAndNextGuiLoop();
 
-            UnityEngine.Debug.Log($"[AlSoTimeline] Created group '{groupName}' (Actor+Move+Action).");
-            return true;
-        }
-    }
-
-    /// <summary>
-    /// Пункт в контекстном меню Timeline (ПКМ).
-    /// </summary>
-    [MenuEntry("AlSo/Create Character Group (Actor+Move+Action)", MenuPriority.defaultPriority)]
-    public class CreateAlSoCharacterGroupTimelineAction : TimelineAction
-    {
-        public override ActionValidity Validate(ActionContext context)
-        {
-            // Если NotApplicable — пункта в меню НЕ будет.
-            var asset = TimelineEditor.inspectedAsset ?? TimelineEditor.masterAsset;
-            return asset != null ? ActionValidity.Valid : ActionValidity.NotApplicable;
-        }
-
-        public override bool Execute(ActionContext context)
-        {
-            return AlSoTimelineScaffold.TryCreateCharacterGroupFromSelection();
-        }
-    }
-
-    public static class CreateAlSoCharacterGroupHierarchyMenu
-    {
-        /// <summary>
-        /// Пункт в контекстном меню Hierarchy (ПКМ по GameObject).
-        /// </summary>
-        [MenuItem("GameObject/AlSo/Timeline/Create Character Group (Actor+Move+Action)", false, 49)]
-        private static void CreateFromHierarchy(MenuCommand command)
-        {
-            // Selection.activeTransform уже будет правильным (клик по объекту в иерархии)
-            AlSoTimelineScaffold.TryCreateCharacterGroupFromSelection();
+            UnityEngine.Debug.Log($"[AlSoTimeline] Created group '{groupName}' in Director '{director.name}', bound Actor='{actor.name}'.");
         }
 
         [MenuItem("GameObject/AlSo/Timeline/Create Character Group (Actor+Move+Action)", true)]
-        private static bool ValidateCreateFromHierarchy(MenuCommand command)
+        private static bool ValidateCreate(MenuCommand command)
         {
-            var asset = TimelineEditor.inspectedAsset ?? TimelineEditor.masterAsset;
-            return asset != null && Selection.activeTransform != null;
+            if (Selection.activeTransform == null)
+            {
+                return false;
+            }
+
+            PlayableDirector director = TimelineEditor.inspectedDirector ?? TimelineEditor.masterDirector;
+            if (director == null)
+            {
+                return false;
+            }
+
+            return director.playableAsset is TimelineAsset;
+        }
+
+        private static void ForceTimelineRefreshNowAndNextGuiLoop()
+        {
+            // Ты добавляешь треки -> ContentsAddedOrRemoved.
+            // Плюс перерисовка окна и иногда апдейт сцены.
+            const RefreshReason reason =
+                RefreshReason.ContentsAddedOrRemoved |
+                RefreshReason.WindowNeedsRedraw |
+                RefreshReason.SceneNeedsUpdate;
+
+            // 1) Попросили Timeline обновиться (происходит на следующем GUI loop). :contentReference[oaicite:3]{index=3}
+            TimelineEditor.Refresh(reason);
+
+            // 2) Иногда окно не репейнтится само — форсим репейнт всех views. :contentReference[oaicite:4]{index=4}
+            InternalEditorUtility.RepaintAllViews();
+
+            // 3) На следующий GUI loop — повторяем (это обычно убирает необходимость “тыкать другой объект”).
+            EditorApplication.delayCall += () =>
+            {
+                TimelineEditor.Refresh(reason);
+                InternalEditorUtility.RepaintAllViews();
+            };
+        }
+
+        private static string MakeUniqueGroupName(TimelineAsset timeline, string baseName)
+        {
+            if (timeline == null)
+            {
+                return baseName;
+            }
+
+            int suffix = 0;
+            string name = baseName;
+
+            while (GroupNameExists(timeline, name))
+            {
+                suffix++;
+                name = $"{baseName} ({suffix})";
+            }
+
+            return name;
+        }
+
+        private static bool GroupNameExists(TimelineAsset timeline, string groupName)
+        {
+            foreach (TrackAsset t in timeline.GetOutputTracks())
+            {
+                if (t is GroupTrack && string.Equals(t.name, groupName, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }
