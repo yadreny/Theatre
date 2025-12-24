@@ -31,7 +31,30 @@ namespace AlSo
         [Header("Time remap (0..1 -> 0..1)")]
         public AnimationCurve normalizedTimeCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
 
-        public ClipCaps clipCaps => ClipCaps.Blending | ClipCaps.ClipIn | ClipCaps.SpeedMultiplier;
+        // фиксируем длину таймлайн-клипа по длине ассетного клипа
+        public override double duration
+        {
+            get
+            {
+                if (action == null || action.Clip == null)
+                {
+                    return 0.0;
+                }
+
+                double len = action.Clip.length;
+                if (len <= 0.0)
+                {
+                    return 0.0;
+                }
+
+                // маленький clamp чтобы не было “нулевой длительности” из-за импорта
+                return Math.Max(0.000001, len);
+            }
+        }
+
+        // капсы: разрешаем blending, но запрещаем ClipIn и SpeedMultiplier,
+        // чтобы таймлайн не мог “растянуть” или “сдвинуть” экшен по времени.
+        public ClipCaps clipCaps => ClipCaps.Blending;
 
         public override Playable CreatePlayable(PlayableGraph graph, GameObject owner)
         {
@@ -77,7 +100,6 @@ namespace AlSo
 
             bool anyActive = false;
 
-            // Для preview берём самый сильный вход (по весу timeline).
             float bestW = 0f;
             ScriptPlayable<LocomotionActionBehaviour> bestP = default;
             LocomotionActionBehaviour bestB = null;
@@ -128,24 +150,18 @@ namespace AlSo
                 return;
             }
 
-            // Норм: при экшене обычно хотим 0 скорость.
             if (bestB.SetSpeedZero)
             {
                 locomotionTest.debugSpeed = Vector2.zero;
                 loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
 
-            // Синхронизируем базовые клипы по абсолютному времени таймлайна
             double trackTime = playable.GetTime();
             loco.SetAbsoluteTime(trackTime);
 
-            // === ВАЖНОЕ ИЗМЕНЕНИЕ ===
-            // Время внутри action клипа берём напрямую из playable time (в секундах),
-            // так мы не ломаемся на clip-in / speed multiplier и на старте получаем 0.
             float clipLen = bestB.Action.Clip.length;
             float localTimeSeconds = Mathf.Clamp((float)bestP.GetTime(), 0f, Mathf.Max(0f, clipLen - 0.0001f));
 
-            // Если задана кривая ремапа (0..1->0..1), применяем её к нормализованному времени
             if (bestB.Curve != null && bestB.Curve.length > 0)
             {
                 float nt = clipLen > eps ? Mathf.Clamp01(localTimeSeconds / clipLen) : 0f;
@@ -154,10 +170,8 @@ namespace AlSo
             }
 
 #if UNITY_EDITOR
-            // ===== EDIT MODE: scrub через PreviewAction + EvaluateGraph(0) =====
             if (!Application.isPlaying)
             {
-                // Чтобы базовый слой точно был “вживлён” в позу (на некоторых сетапах без этого пусто)
                 loco.UpdateLocomotion(Vector2.zero, 0f);
 
                 loco.PreviewAction(bestB.Action, localTimeSeconds, bestW);
@@ -166,18 +180,12 @@ namespace AlSo
             }
 #endif
 
-            // ===== PLAY MODE =====
-            // Чтобы поведение совпадало со скрабом, по умолчанию тоже драйвим через PreviewAction.
             if (bestB.DriveByTimelineInPlayMode)
             {
                 loco.PreviewAction(bestB.Action, localTimeSeconds, bestW);
                 loco.EvaluateGraph(0f);
                 return;
             }
-
-            // Иначе — “событийный” режим (как раньше): выполнить один раз на входе в клип.
-            // (Оставил, но он именно и даёт отличие от editor scrub.)
-            // Для этого режима нужен отдельный кэш входа; я специально не усложняю здесь, раз по умолчанию driveByTimelineInPlayMode=true.
         }
     }
 }
