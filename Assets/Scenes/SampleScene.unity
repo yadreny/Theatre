@@ -389,8 +389,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0.14314716, z: 0, w: 0.98970145}
-  m_LocalPosition: {x: -8.491102, y: 1.65, z: -19.27}
+  m_LocalRotation: {x: 0, y: -0.95714283, z: 0, w: 0.28961658}
+  m_LocalPosition: {x: 1.63, y: 1.65, z: 1.98}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -878,14 +878,18 @@ PlayableDirector:
   m_SceneBindings:
   - key: {fileID: 0}
     value: {fileID: 1233655656}
-  - key: {fileID: 8075007089671185049, guid: b972d2e21354d6b408efd2c97b0b8191, type: 2}
+  - key: {fileID: 0}
     value: {fileID: 1233655655}
   - key: {fileID: -1337900828416226826, guid: b972d2e21354d6b408efd2c97b0b8191, type: 2}
     value: {fileID: 330585548}
+  - key: {fileID: 3657762061266836079, guid: b972d2e21354d6b408efd2c97b0b8191, type: 2}
+    value: {fileID: 1233655655}
   m_ExposedReferences:
     m_References:
     - b302c6b60337dea42b9c6f6f8c3ebaa1: {fileID: 276877684}
+    - b168544369e7d6e46a35f2ae3a74ad54: {fileID: 276877684}
     - 28632d0837cc89a4096e62b7206027b9: {fileID: 500756863}
+    - 59d817cdf130b72438a61f318b9f8fde: {fileID: 2027876943}
     - 98930c7fa37362b4d8f874c6ebb135ac: {fileID: 346366408}
     - 9923060531f10e447b95392162452624: {fileID: 2027876943}
     - a9fc069850621f04e82e05bd4838b9e6: {fileID: 276877684}
@@ -989,7 +993,7 @@ Transform:
   m_GameObject: {fileID: 1233655651}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -6.570333, y: 0.5, z: -13.301666}
+  m_LocalPosition: {x: 0, y: 0.5, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1007,15 +1011,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9767409b7039a0240b05d48307db0617, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  defaultDuration: 1
-  useUnscaledTime: 0
-  useLocalPosition: 0
-  destination: {fileID: 276877684}
-  _isMoving: 0
-  _start: {x: 0, y: 0, z: 0}
-  _target: {x: 0, y: 0, z: 0}
-  _duration: 0
-  _elapsed: 0
 --- !u!1 &1592122119
 GameObject:
   m_ObjectHideFlags: 0
@@ -1486,15 +1481,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9767409b7039a0240b05d48307db0617, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  defaultDuration: 1
-  useUnscaledTime: 0
-  useLocalPosition: 0
-  destination: {fileID: 276877684}
-  _isMoving: 0
-  _start: {x: 0, y: 0, z: 0}
-  _target: {x: 0, y: 0, z: 0}
-  _duration: 0
-  _elapsed: 0
 --- !u!135 &2027876945
 SphereCollider:
   m_ObjectHideFlags: 0
@@ -1527,6 +1513,6 @@ SceneRoots:
   - {fileID: 2027876943}
   - {fileID: 276877684}
   - {fileID: 1233655655}
-  - {fileID: 952982901}
   - {fileID: 500756864}
   - {fileID: 346366409}
+  - {fileID: 952982901}

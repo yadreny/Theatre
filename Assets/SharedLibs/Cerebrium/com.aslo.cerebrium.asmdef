@@ -1,0 +1,16 @@
+{
+    "name": "com.aslo.cerebrium",
+    "rootNamespace": "",
+    "references": [
+        "GUID:b32fdb8067e8cf94d8902f1b360caf89"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
