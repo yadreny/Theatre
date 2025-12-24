@@ -233,16 +233,16 @@ namespace AlSo
 
         public void PerformAction(AnimationActionClip action)
         {
-            if (action == null || action.clip == null)
+            if (action == null || action.Clip == null)
             {
                 UnityEngine.Debug.LogWarning("[LocomotionSystem] PerformAction: action or clip is null.");
                 return;
             }
 
-            float len = action.clip.length;
+            float len = action.Clip.length;
             if (len <= 0f)
             {
-                UnityEngine.Debug.LogWarning($"[LocomotionSystem] PerformAction: clip '{action.clip.name}' has zero length.");
+                UnityEngine.Debug.LogWarning($"[LocomotionSystem] PerformAction: clip '{action.Clip.name}' has zero length.");
                 return;
             }
 
@@ -250,7 +250,7 @@ namespace AlSo
             float fadeOut = Mathf.Max(0f, action.fadeOutPercent) * len;
 
             _currentActionData = action;
-            PerformClip(action.clip, fadeIn, fadeOut);
+            PerformClip(action.Clip, fadeIn, fadeOut);
         }
 
         public void Execute(string actionName)
@@ -432,9 +432,9 @@ namespace AlSo
                     var idle = _profile.idle;
                     if (idle != null)
                     {
-                        lfCurve = idle.leftFootMagnet;
-                        rfCurve = idle.rightFootMagnet;
-                        hipCurve = idle.hipMaxOffset;
+                        lfCurve = idle.LeftFootMagnet;
+                        rfCurve = idle.RightFootMagnet;
+                        hipCurve = idle.HipMaxOffset;
                     }
                 }
                 else
@@ -447,9 +447,9 @@ namespace AlSo
                         var move = _profile.moves[moveIndex];
                         if (move != null)
                         {
-                            lfCurve = move.leftFootMagnet;
-                            rfCurve = move.rightFootMagnet;
-                            hipCurve = move.hipMaxOffset;
+                            lfCurve = move.LeftFootMagnet;
+                            rfCurve = move.RightFootMagnet;
+                            hipCurve = move.HipMaxOffset;
                         }
                     }
                 }
@@ -470,19 +470,19 @@ namespace AlSo
             // Ёкшен поверх локомоушена
             if (_currentActionData != null &&
                 _actionPlayable.IsValid() &&
-                _currentActionData.clip != null &&
-                _currentActionData.clip.length > 0f &&
+                _currentActionData.Clip != null &&
+                _currentActionData.Clip.length > 0f &&
                 _actionWeight > eps)
             {
-                float len = _currentActionData.clip.length;
+                float len = _currentActionData.Clip.length;
                 double t = _actionPlayable.GetTime();
                 float localTime = len > 0f
                     ? (float)(t % len)
                     : 0f;
 
-                float actLeft = EvaluateCurve(_currentActionData.leftFootMagnet, localTime);
-                float actRight = EvaluateCurve(_currentActionData.rightFootMagnet, localTime);
-                float actHip = EvaluateCurve(_currentActionData.hipMaxOffset, localTime);
+                float actLeft = EvaluateCurve(_currentActionData.LeftFootMagnet, localTime);
+                float actRight = EvaluateCurve(_currentActionData.RightFootMagnet, localTime);
+                float actHip = EvaluateCurve(_currentActionData.HipMaxOffset, localTime);
 
                 float aw = _actionWeight;
 
@@ -642,9 +642,9 @@ namespace AlSo
 
             // ќпционально: если сейчас играет action-слой Ч тоже синхронизируем фазу.
             // Ёто Ќ≈ управл€ет fade state/логикой _actionTime, только ставит врем€ клипа.
-            if (_currentActionData != null && _currentActionData.clip != null && _actionPlayable.IsValid())
+            if (_currentActionData != null && _currentActionData.Clip != null && _actionPlayable.IsValid())
             {
-                double len = _currentActionData.clip.length;
+                double len = _currentActionData.Clip.length;
                 if (len > 0.0)
                 {
                     double t = timeSeconds % len;

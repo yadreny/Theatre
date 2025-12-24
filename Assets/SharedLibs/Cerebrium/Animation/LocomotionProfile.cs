@@ -24,12 +24,12 @@ namespace AlSo
                 int moveCount = moves != null ? moves.Length : 0;
                 var result = new AnimationClip[1 + moveCount];
 
-                result[0] = idle != null ? idle.clip : null;
+                result[0] = idle != null ? idle.Clip : null;
 
                 for (int i = 0; i < moveCount; i++)
                 {
                     AnimationMoveClip m = moves[i];
-                    result[1 + i] = m != null ? m.clip : null;
+                    result[1 + i] = m != null ? m.Clip : null;
                 }
 
                 return result;
@@ -65,13 +65,13 @@ namespace AlSo
             for (int i = 0; i < moveCount; i++)
             {
                 AnimationMoveClip m = moves[i];
-                if (m == null || m.clip == null)
+                if (m == null || m.Clip == null)
                 {
                     _cachedPoints[1 + i] = Vector2.zero;
                     continue;
                 }
 
-                Vector3 avg = m.clip.averageSpeed;
+                Vector3 avg = m.Clip.averageSpeed;
                 _cachedPoints[1 + i] = new Vector2(avg.x, avg.z);
             }
 
@@ -88,7 +88,7 @@ namespace AlSo
             for (int i = 0; i < actions.Length; i++)
             {
                 AnimationActionClip a = actions[i];
-                if (a != null && a.clip != null && a.name == name)
+                if (a != null && a.Clip != null && a.name == name)
                 {
                     return a;
                 }

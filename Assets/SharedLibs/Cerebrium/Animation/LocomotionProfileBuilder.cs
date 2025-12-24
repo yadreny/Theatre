@@ -41,6 +41,30 @@ namespace AlSo
         public float partialMagnet = 0.2f;
 
 #if UNITY_EDITOR
+
+        [Serializable]
+        private class FootAndHipBakeResult
+        {
+            public AnimationCurve leftFootMagnet;
+            public AnimationCurve rightFootMagnet;
+            public AnimationCurve hipMaxOffset;
+
+            public float leftLegYDelta;
+            public float rightLegYDelta;
+
+            public static FootAndHipBakeResult Empty()
+            {
+                return new FootAndHipBakeResult
+                {
+                    leftFootMagnet = new AnimationCurve(),
+                    rightFootMagnet = new AnimationCurve(),
+                    hipMaxOffset = new AnimationCurve(),
+                    leftLegYDelta = 0f,
+                    rightLegYDelta = 0f
+                };
+            }
+        }
+
         private Animator ResolveSamplingAnimator()
         {
             if (samplingAnimator != null)
@@ -116,16 +140,14 @@ namespace AlSo
                     targetProfile.idle = new AnimationIdleClip();
                 }
 
-                targetProfile.idle.clip = idlePrepared;
+                targetProfile.idle.Clip = idlePrepared;
 
-                BakeFootAndHipCurves(
-                    anim,
-                    idlePrepared,
-                    out targetProfile.idle.leftFootMagnet,
-                    out targetProfile.idle.rightFootMagnet,
-                    out targetProfile.idle.hipMaxOffset,
-                    out targetProfile.idle.leftLegYDelta,
-                    out targetProfile.idle.rightLegYDelta);
+                FootAndHipBakeResult idleBake = BakeFootAndHipCurves(anim, idlePrepared);
+                targetProfile.idle.LeftFootMagnet = idleBake.leftFootMagnet;
+                targetProfile.idle.RightFootMagnet = idleBake.rightFootMagnet;
+                targetProfile.idle.HipMaxOffset = idleBake.hipMaxOffset;
+                targetProfile.idle.LeftLegYDelta = idleBake.leftLegYDelta;
+                targetProfile.idle.RightLegYDelta = idleBake.rightLegYDelta;
             }
             else
             {
@@ -162,17 +184,15 @@ namespace AlSo
 
                     AnimationMoveClip moveData = new AnimationMoveClip
                     {
-                        clip = prepared
+                        Clip = prepared
                     };
 
-                    BakeFootAndHipCurves(
-                        anim,
-                        prepared,
-                        out moveData.leftFootMagnet,
-                        out moveData.rightFootMagnet,
-                        out moveData.hipMaxOffset,
-                        out moveData.leftLegYDelta,
-                        out moveData.rightLegYDelta);
+                    FootAndHipBakeResult moveBake = BakeFootAndHipCurves(anim, prepared);
+                    moveData.LeftFootMagnet = moveBake.leftFootMagnet;
+                    moveData.RightFootMagnet = moveBake.rightFootMagnet;
+                    moveData.HipMaxOffset = moveBake.hipMaxOffset;
+                    moveData.LeftLegYDelta = moveBake.leftLegYDelta;
+                    moveData.RightLegYDelta = moveBake.rightLegYDelta;
 
                     moveList.Add(moveData);
                 }
@@ -205,19 +225,17 @@ namespace AlSo
                     AnimationActionClip actionData = new AnimationActionClip
                     {
                         name = src.name,
-                        clip = prepared,
+                        Clip = prepared,
                         fadeInPercent = src.fadeInPercent,
                         fadeOutPercent = src.fadeOutPercent
                     };
 
-                    BakeFootAndHipCurves(
-                        anim,
-                        prepared,
-                        out actionData.leftFootMagnet,
-                        out actionData.rightFootMagnet,
-                        out actionData.hipMaxOffset,
-                        out actionData.leftLegYDelta,
-                        out actionData.rightLegYDelta);
+                    FootAndHipBakeResult actionBake = BakeFootAndHipCurves(anim, prepared);
+                    actionData.LeftFootMagnet = actionBake.leftFootMagnet;
+                    actionData.RightFootMagnet = actionBake.rightFootMagnet;
+                    actionData.HipMaxOffset = actionBake.hipMaxOffset;
+                    actionData.LeftLegYDelta = actionBake.leftLegYDelta;
+                    actionData.RightLegYDelta = actionBake.rightLegYDelta;
 
                     actionList.Add(actionData);
                 }
@@ -325,18 +343,13 @@ namespace AlSo
                 AssetDatabase.CreateAsset(newClip, newPath);
             }
 
-            // Копируем всё содержимое из source
             EditorUtility.CopySerialized(source, newClip);
-
-            // ВАЖНО: выравниваем имя объекта под имя файла, чтобы Unity не предлагал "Fix object name"
             newClip.name = newObjectName;
 
-            // --- РЕТАЙМ КРИВЫХ БЕЗ УДАЛЕНИЯ (как в старой рабочей версии) ---
             if (source.length > 0f && Mathf.Abs(source.length - targetLength) > 0.0001f)
             {
                 float scale = targetLength / source.length;
 
-                // Обычные кривые
                 var bindings = AnimationUtility.GetCurveBindings(newClip);
                 for (int i = 0; i < bindings.Length; i++)
                 {
@@ -359,7 +372,6 @@ namespace AlSo
                     newClip.SetCurve(b.path, b.type, b.propertyName, curve);
                 }
 
-                // Reference-кривые (ObjectReferenceKeyframe)
                 var refBindings = AnimationUtility.GetObjectReferenceCurveBindings(newClip);
                 for (int i = 0; i < refBindings.Length; i++)
                 {
@@ -380,7 +392,6 @@ namespace AlSo
                     AnimationUtility.SetObjectReferenceCurve(newClip, rb, refCurve);
                 }
 
-                // Events
                 var events = AnimationUtility.GetAnimationEvents(newClip);
                 if (events != null && events.Length > 0)
                 {
@@ -406,25 +417,13 @@ namespace AlSo
             return newClip;
         }
 
-        private void BakeFootAndHipCurves(
-            Animator animator,
-            AnimationClip clip,
-            out AnimationCurve leftMag,
-            out AnimationCurve rightMag,
-            out AnimationCurve hipCurve,
-            out float leftLegYDelta,
-            out float rightLegYDelta)
+        private FootAndHipBakeResult BakeFootAndHipCurves(Animator animator, AnimationClip clip)
         {
-            leftMag = new AnimationCurve();
-            rightMag = new AnimationCurve();
-            hipCurve = new AnimationCurve();
-
-            leftLegYDelta = 0f;
-            rightLegYDelta = 0f;
+            FootAndHipBakeResult result = FootAndHipBakeResult.Empty();
 
             if (animator == null || clip == null)
             {
-                return;
+                return result;
             }
 
             Transform leftFoot = animator.GetBoneTransform(HumanBodyBones.LeftFoot);
@@ -436,13 +435,13 @@ namespace AlSo
                 UnityEngine.Debug.LogWarning(
                     "[LocomotionProfileBuilder] BakeFootAndHipCurves: missing humanoid bones for clip " +
                     clip.name);
-                return;
+                return result;
             }
 
             float length = clip.length;
             if (length <= 0f)
             {
-                return;
+                return result;
             }
 
             int samplesPerSec = Mathf.Max(1, curveSamplesPerSecond);
@@ -460,7 +459,6 @@ namespace AlSo
             float minRight = float.PositiveInfinity;
             float maxRight = float.NegativeInfinity;
 
-            // первый проход — снимаем высоты и ищем min/max
             for (int i = 0; i < sampleCount; i++)
             {
                 float tNorm = sampleCount == 1 ? 0f : (float)i / (sampleCount - 1);
@@ -483,8 +481,8 @@ namespace AlSo
                 if (ry > maxRight) maxRight = ry;
             }
 
-            leftLegYDelta = maxLeft - minLeft;
-            rightLegYDelta = maxRight - minRight;
+            result.leftLegYDelta = maxLeft - minLeft;
+            result.rightLegYDelta = maxRight - minRight;
 
             float eps = 1e-5f;
 
@@ -497,7 +495,6 @@ namespace AlSo
                 tTotal = tmp;
             }
 
-            // второй проход — строим кривые
             for (int i = 0; i < sampleCount; i++)
             {
                 float tNorm = sampleCount == 1 ? 0f : (float)i / (sampleCount - 1);
@@ -510,12 +507,14 @@ namespace AlSo
                 float leftMagValue = ComputeMagnetFromHeight(ly, minLeft, maxLeft, tTotal, tPartial, eps);
                 float rightMagValue = ComputeMagnetFromHeight(ry, minRight, maxRight, tTotal, tPartial, eps);
 
-                leftMag.AddKey(new Keyframe(t, leftMagValue));
-                rightMag.AddKey(new Keyframe(t, rightMagValue));
+                result.leftFootMagnet.AddKey(new Keyframe(t, leftMagValue));
+                result.rightFootMagnet.AddKey(new Keyframe(t, rightMagValue));
 
                 float f = Mathf.Max(hy - ly, hy - ry);
-                hipCurve.AddKey(new Keyframe(t, f));
+                result.hipMaxOffset.AddKey(new Keyframe(t, f));
             }
+
+            return result;
         }
 
         private static float ComputeMagnetFromHeight(
@@ -529,7 +528,6 @@ namespace AlSo
             float range = max - min;
             if (range < eps)
             {
-                // нога почти не двигается по высоте — считаем, что всегда на земле
                 return 1f;
             }
 
@@ -551,15 +549,10 @@ namespace AlSo
                 return 0f;
             }
 
-            float k = (norm - totalP) / span; // 0..1
-            return 1f - k;                    // 1 -> 0
+            float k = (norm - totalP) / span;
+            return 1f - k;
         }
 
-        /// <summary>
-        /// Ищем опорный кадр для cycleOffset:
-        /// левая нога максимально низко, правая максимально высоко.
-        /// Возвращает нормализованное время 0..1.
-        /// </summary>
         private float FindCycleOffset(AnimationClip clip, Animator animator)
         {
             if (clip == null || animator == null || clip.length <= 0f)
@@ -590,8 +583,8 @@ namespace AlSo
 
                 clip.SampleAnimation(animator.gameObject, t);
 
-                float ly = leftFoot.position.y;  // хотим ниже
-                float ry = rightFoot.position.y; // хотим выше
+                float ly = leftFoot.position.y;
+                float ry = rightFoot.position.y;
 
                 float score = (-ly) + (ry);
 
@@ -605,9 +598,6 @@ namespace AlSo
             return Mathf.Clamp01(bestNormTime);
         }
 
-        /// <summary>
-        /// Применяем cycleOffset к импортным настройкам клипа.
-        /// </summary>
         private static void SetClipCycleOffset(AnimationClip clip, float offset)
         {
             offset = Mathf.Repeat(offset, 1f);
@@ -618,6 +608,7 @@ namespace AlSo
 
             EditorUtility.SetDirty(clip);
         }
+
 #endif
     }
 }
