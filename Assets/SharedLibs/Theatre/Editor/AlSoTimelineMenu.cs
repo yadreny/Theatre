@@ -1,5 +1,6 @@
 ﻿#if UNITY_EDITOR
 using System;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.Timeline;
 using UnityEditorInternal;
@@ -11,17 +12,23 @@ namespace AlSo
 {
     public static class AlSoTimelineHierarchyCreateGroup
     {
-        [MenuItem("GameObject/AlSo/Timeline/Create Character Group (Actor+Move+Action)", false, 49)]
+        [MenuItem("GameObject/AlSo/Timeline/Create Character Groups (Actor+Move+Action)", false, 49)]
         private static void Create(MenuCommand command)
         {
-            Transform actor = Selection.activeTransform;
-            if (actor == null)
+            // Unity может вызвать этот MenuItem несколько раз (по одному на каждый выбранный объект).
+            // Выполняем реальную работу только один раз — на вызове, соответствующем activeObject.
+            if (command == null || command.context == null || command.context != Selection.activeObject)
             {
-                UnityEngine.Debug.LogWarning("[AlSoTimeline] No active Transform selected.");
                 return;
             }
 
-            // Важно: при lock Timeline окна inspectedDirector остаётся стабильным.
+            Transform[] selection = Selection.transforms;
+            if (selection == null || selection.Length == 0)
+            {
+                UnityEngine.Debug.LogWarning("[AlSoTimeline] No transforms selected.");
+                return;
+            }
+
             PlayableDirector director = TimelineEditor.inspectedDirector ?? TimelineEditor.masterDirector;
             if (director == null)
             {
@@ -29,8 +36,7 @@ namespace AlSo
                 return;
             }
 
-            TimelineAsset timeline = director.playableAsset as TimelineAsset;
-            if (timeline == null)
+            if (director.playableAsset is not TimelineAsset timeline)
             {
                 UnityEngine.Debug.LogWarning("[AlSoTimeline] Director.playableAsset is not a TimelineAsset.");
                 return;
@@ -43,41 +49,87 @@ namespace AlSo
                 return;
             }
 
-            string groupName = MakeUniqueGroupName(timeline, actor.name);
+            // Убираем дубликаты трансформов
+            var actors = new List<Transform>(selection.Length);
+            var used = new HashSet<int>();
 
-            Undo.RegisterCompleteObjectUndo(timeline, "Create AlSo Character Group");
+            for (int i = 0; i < selection.Length; i++)
+            {
+                Transform t = selection[i];
+                if (t == null)
+                {
+                    continue;
+                }
 
-            // Group
-            GroupTrack group = timeline.CreateTrack<GroupTrack>(null, groupName);
-            group.name = groupName;
+                int id = t.GetInstanceID();
+                if (used.Add(id))
+                {
+                    actors.Add(t);
+                }
+            }
 
-            // Actor binding track (Transform)
-            LocomotionActorBindingTrack actorTrack = timeline.CreateTrack<LocomotionActorBindingTrack>(group, "Actor");
-            actorTrack.name = "Actor";
+            if (actors.Count == 0)
+            {
+                UnityEngine.Debug.LogWarning("[AlSoTimeline] Selection contains no valid transforms.");
+                return;
+            }
 
-            // Move / Action tracks
-            LocomotionRunToTrack moveTrack = timeline.CreateTrack<LocomotionRunToTrack>(group, "Move");
-            moveTrack.name = "Move";
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Create AlSo Character Groups");
 
-            LocomotionActionTrack actionTrack = timeline.CreateTrack<LocomotionActionTrack>(group, "Action");
-            actionTrack.name = "Action";
+            Undo.RegisterCompleteObjectUndo(timeline, "Create AlSo Character Groups");
+            Undo.RecordObject(director, "Bind AlSo Actor Tracks");
 
-            // Bind Actor track to selected Transform
-            Undo.RecordObject(director, "Bind AlSo Actor Track");
-            director.SetGenericBinding(actorTrack, actor);
+            int created = 0;
+
+            for (int i = 0; i < actors.Count; i++)
+            {
+                Transform actor = actors[i];
+                if (actor == null)
+                {
+                    continue;
+                }
+
+                string groupName = MakeUniqueGroupName(timeline, actor.name);
+
+                GroupTrack group = timeline.CreateTrack<GroupTrack>(null, groupName);
+                group.name = groupName;
+
+                // Развернуть группу сразу
+                TrackExtensions.SetCollapsed(group, false);
+
+                LocomotionActorBindingTrack actorTrack = timeline.CreateTrack<LocomotionActorBindingTrack>(group, "Actor");
+                actorTrack.name = "Actor";
+
+                LocomotionRunToTrack moveTrack = timeline.CreateTrack<LocomotionRunToTrack>(group, "Move");
+                moveTrack.name = "Move";
+
+                LocomotionActionTrack actionTrack = timeline.CreateTrack<LocomotionActionTrack>(group, "Action");
+                actionTrack.name = "Action";
+
+                // Каждый Actor трек -> свой Transform
+                director.SetGenericBinding(actorTrack, actor);
+
+                created++;
+            }
 
             EditorUtility.SetDirty(director);
             EditorUtility.SetDirty(timeline);
 
             ForceTimelineRefreshNowAndNextGuiLoop();
 
-            UnityEngine.Debug.Log($"[AlSoTimeline] Created group '{groupName}' in Director '{director.name}', bound Actor='{actor.name}'.");
+            Undo.CollapseUndoOperations(undoGroup);
+
+            UnityEngine.Debug.Log($"[AlSoTimeline] Created {created} character group(s) in Director '{director.name}'.");
         }
 
-        [MenuItem("GameObject/AlSo/Timeline/Create Character Group (Actor+Move+Action)", true)]
+        [MenuItem("GameObject/AlSo/Timeline/Create Character Groups (Actor+Move+Action)", true)]
         private static bool ValidateCreate(MenuCommand command)
         {
-            if (Selection.activeTransform == null)
+            // Чтобы пункт был доступен в контексте, но не “дублировался” по логике —
+            // оставляем видимым всегда, если есть selection и есть Timeline.
+            if (Selection.transforms == null || Selection.transforms.Length == 0)
             {
                 return false;
             }
@@ -93,20 +145,14 @@ namespace AlSo
 
         private static void ForceTimelineRefreshNowAndNextGuiLoop()
         {
-            // Ты добавляешь треки -> ContentsAddedOrRemoved.
-            // Плюс перерисовка окна и иногда апдейт сцены.
             const RefreshReason reason =
                 RefreshReason.ContentsAddedOrRemoved |
                 RefreshReason.WindowNeedsRedraw |
                 RefreshReason.SceneNeedsUpdate;
 
-            // 1) Попросили Timeline обновиться (происходит на следующем GUI loop). :contentReference[oaicite:3]{index=3}
             TimelineEditor.Refresh(reason);
-
-            // 2) Иногда окно не репейнтится само — форсим репейнт всех views. :contentReference[oaicite:4]{index=4}
             InternalEditorUtility.RepaintAllViews();
 
-            // 3) На следующий GUI loop — повторяем (это обычно убирает необходимость “тыкать другой объект”).
             EditorApplication.delayCall += () =>
             {
                 TimelineEditor.Refresh(reason);
@@ -116,11 +162,6 @@ namespace AlSo
 
         private static string MakeUniqueGroupName(TimelineAsset timeline, string baseName)
         {
-            if (timeline == null)
-            {
-                return baseName;
-            }
-
             int suffix = 0;
             string name = baseName;
 
