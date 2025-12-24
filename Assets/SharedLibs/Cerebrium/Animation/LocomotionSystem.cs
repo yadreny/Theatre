@@ -1,8 +1,6 @@
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
-using Codice.CM.Common;
-
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -44,9 +42,12 @@ namespace AlSo
         private float _actionTime;
         private float _actionDuration;
 
-        private AnimationActionClip _currentActionData;
+        private IAnimationActionClip _currentActionData;
 
-        // === Сбленденные значения кривых ===
+        // Timeline-preview state (чтобы UpdateAction(dt) не перетирал веса/тайм)
+        private bool _previewActionActive;
+
+        // === бленденные значения кривых ===
         public float CurrentLeftFootMagnet { get; private set; }
         public float CurrentRightFootMagnet { get; private set; }
         public float CurrentHipMaxOffset { get; private set; }
@@ -114,6 +115,7 @@ namespace AlSo
                 {
                     co = 0f;
                 }
+
                 _cycleOffsets[i] = co;
 #else
                 _cycleOffsets[i] = 0f;
@@ -137,50 +139,127 @@ namespace AlSo
             _graph.Play();
         }
 
-        //public void UpdateLocomotion(Vector2 speed)
-        //{
-        //    if (!_graph.IsValid())
-        //    {
-        //        return;
-        //    }
+        // --- public API ---
 
-        //    var clips = _profile.RuntimeClips;
-        //    if (clips == null || clips.Length == 0)
-        //    {
-        //        return;
-        //    }
+        public void Destroy()
+        {
+            if (_graph.IsValid())
+            {
+                _graph.Destroy();
+            }
+        }
 
-        //    float[] weights = _weightCalculator.GetWeights(speed);
-        //    if (weights == null || weights.Length == 0)
-        //    {
-        //        return;
-        //    }
+        public void EvaluateGraph(float dt)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
 
-        //    int mixerInputs = _locomotionMixer.GetInputCount();
-        //    int count = Mathf.Min(weights.Length, mixerInputs);
+            _graph.Evaluate(dt);
+        }
 
-        //    if (_lastWeights == null || _lastWeights.Length != weights.Length)
-        //    {
-        //        _lastWeights = new float[weights.Length];
-        //    }
+        /// <summary>
+        /// ВАЖНО для Timeline scrubbing:
+        /// синхронизируем ТОЛЬКО базовые клипы (idle/move) с абсолютным временем.
+        ///
+        /// Action playable НЕ трогаем тут вообще — иначе он начинает жить от глобального времени
+        /// таймлайна и ломает локальную фазу action-клипа (и может давать "провал по пояс").
+        /// </summary>
+        public void SetAbsoluteTime(double absoluteTimeSeconds)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
 
-        //    for (int i = 0; i < count; i++)
-        //    {
-        //        float w = weights[i];
-        //        _lastWeights[i] = w;
-        //        _locomotionMixer.SetInputWeight(i, w);
-        //    }
+            var clips = _profile.RuntimeClips;
+            if (clips == null || clips.Length == 0)
+            {
+                return;
+            }
 
-        //    for (int i = count; i < mixerInputs; i++)
-        //    {
-        //        _locomotionMixer.SetInputWeight(i, 0f);
-        //    }
+            for (int i = 0; i < _clipPlayables.Length; i++)
+            {
+                var p = _clipPlayables[i];
+                var clip = clips[i];
 
-        //    UpdateAction(Time.deltaTime);
-        //    UpdateFootAndHipFromCurves();
-        //}
+                if (!p.IsValid() || clip == null || clip.length <= 0f)
+                {
+                    continue;
+                }
 
-        // --- Экшены ---
+                double len = clip.length;
+                double t = absoluteTimeSeconds;
+
+#if UNITY_EDITOR
+                if (_useCycleOffsetPhase)
+                {
+                    t += _cycleOffsets != null && i < _cycleOffsets.Length ? _cycleOffsets[i] * len : 0.0;
+                }
+#endif
+
+                double local = t % len;
+                if (local < 0.0) local += len;
+
+                p.SetTime(local);
+            }
+        }
+
+        public void UpdateLocomotion(Vector2 speed)
+        {
+            UpdateLocomotion(speed, Time.deltaTime);
+        }
+
+        public void UpdateLocomotion(Vector2 speed, float dt)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            var clips = _profile.RuntimeClips;
+            if (clips == null || clips.Length == 0)
+            {
+                return;
+            }
+
+            float[] weights = _weightCalculator.GetWeights(speed);
+            if (weights == null || weights.Length == 0)
+            {
+                return;
+            }
+
+            int mixerInputs = _locomotionMixer.GetInputCount();
+            int count = Mathf.Min(weights.Length, mixerInputs);
+
+            if (_lastWeights == null || _lastWeights.Length != weights.Length)
+            {
+                _lastWeights = new float[weights.Length];
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                float w = weights[i];
+                _lastWeights[i] = w;
+                _locomotionMixer.SetInputWeight(i, w);
+            }
+
+            for (int i = count; i < mixerInputs; i++)
+            {
+                _locomotionMixer.SetInputWeight(i, 0f);
+            }
+
+            // Action state machine трогаем только если не в timeline-preview
+            if (!_previewActionActive)
+            {
+                UpdateAction(dt);
+            }
+
+            UpdateFootAndHipFromCurves();
+        }
+
+        // --- Actions (runtime) ---
 
         public void PerformClip(AnimationClip clip, float fadeIn = 0.1f, float fadeOut = 0.1f)
         {
@@ -201,6 +280,9 @@ namespace AlSo
                 UnityEngine.Debug.LogWarning($"[LocomotionSystem] PerformClip: clip '{clip.name}' has zero length.");
                 return;
             }
+
+            // runtime-режим, preview выключаем
+            _previewActionActive = false;
 
             if (_actionPlayable.IsValid())
             {
@@ -232,6 +314,11 @@ namespace AlSo
         }
 
         public void PerformAction(AnimationActionClip action)
+        {
+            PerformAction(action as IAnimationActionClip);
+        }
+
+        public void PerformAction(IAnimationActionClip action)
         {
             if (action == null || action.Clip == null)
             {
@@ -275,6 +362,112 @@ namespace AlSo
             }
 
             PerformAction(action);
+        }
+
+        // --- Actions (Timeline preview / scrubbing) ---
+
+        /// <summary>
+        /// Превью-режим: Timeline сам задаёт время внутри action-клипа и итоговый вес слоя.
+        /// Это даёт корректный скраб в Edit Mode.
+        /// </summary>
+        public void PreviewAction(IAnimationActionClip action, float localTimeSeconds, float layerWeight01)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            if (action == null || action.Clip == null || action.Clip.length <= 0f)
+            {
+                ClearActionPreview();
+                return;
+            }
+
+            _previewActionActive = true;
+
+            bool needRecreate = !_actionPlayable.IsValid();
+
+            if (!needRecreate && _currentActionData != null && _currentActionData.Clip != null)
+            {
+                if (_currentActionData.Clip != action.Clip)
+                {
+                    needRecreate = true;
+                }
+            }
+
+            if (needRecreate)
+            {
+                if (_actionPlayable.IsValid())
+                {
+                    _graph.Disconnect(_layerMixer, 1);
+                    _actionPlayable.Destroy();
+                    _actionPlayable = default;
+                }
+
+                _actionPlayable = AnimationClipPlayable.Create(_graph, action.Clip);
+                _actionPlayable.SetApplyFootIK(false);
+                _actionPlayable.SetApplyPlayableIK(false);
+                _graph.Connect(_actionPlayable, 0, _layerMixer, 1);
+            }
+
+            _currentActionData = action;
+
+            // В preview ACTION НИКОГДА не тикает сам.
+            _actionPlayable.SetSpeed(0.0);
+
+            // runtime-state machine выключаем
+            _actionState = ActionState.None;
+            _actionTime = 0f;
+            _actionDuration = action.Clip.length;
+
+            float len = action.Clip.length;
+            float t = Mathf.Clamp(localTimeSeconds, 0f, Mathf.Max(0f, len - 0.0001f));
+            _actionPlayable.SetTime(t);
+
+            float fadeIn = Mathf.Clamp01(action.FadeInPercent) * len;
+            float fadeOut = Mathf.Clamp01(action.FadeOutPercent) * len;
+
+            float wIn = fadeIn <= 0f ? 1f : Mathf.Clamp01(t / fadeIn);
+            float wOut = fadeOut <= 0f ? 1f : Mathf.Clamp01((len - t) / fadeOut);
+            float envelope = Mathf.Min(wIn, wOut);
+
+            _actionWeight = Mathf.Clamp01(envelope * Mathf.Clamp01(layerWeight01));
+            _layerMixer.SetInputWeight(1, _actionWeight);
+            _layerMixer.SetInputWeight(0, 1f - _actionWeight);
+
+            UpdateFootAndHipFromCurves();
+        }
+
+        public void ClearActionPreview()
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            if (!_previewActionActive)
+            {
+                return;
+            }
+
+            _previewActionActive = false;
+
+            _actionWeight = 0f;
+            _actionState = ActionState.None;
+
+            _layerMixer.SetInputWeight(1, 0f);
+            _layerMixer.SetInputWeight(0, 1f);
+
+            UpdateFootAndHipFromCurves();
+        }
+
+        private void StopAction()
+        {
+            _actionState = ActionState.None;
+            _actionWeight = 0f;
+            _layerMixer.SetInputWeight(1, 0f);
+            _layerMixer.SetInputWeight(0, 1f);
+            _currentActionData = null;
         }
 
         private void UpdateAction(float dt)
@@ -354,52 +547,45 @@ namespace AlSo
 
             _actionWeight = Mathf.Clamp01(_actionWeight);
 
-            _layerMixer.SetInputWeight(0, 1f);
             _layerMixer.SetInputWeight(1, _actionWeight);
-        }
+            _layerMixer.SetInputWeight(0, 1f - _actionWeight);
 
-        private void StopAction()
-        {
-            _actionState = ActionState.None;
-
-            if (_actionPlayable.IsValid())
+            if (_actionDuration > 0f && _actionTime >= _actionDuration)
             {
-                _graph.Disconnect(_layerMixer, 1);
-                _actionPlayable.Destroy();
-                _actionPlayable = default;
+                StopAction();
             }
-
-            _layerMixer.SetInputWeight(1, 0f);
-            _layerMixer.SetInputWeight(0, 1f);
-            _currentActionData = null;
-            _actionWeight = 0f;
         }
 
-        // === Считаем сбленденные значения кривых ===
+        // --- Foot/Hip curves ---
+
+        public void EvaluateFootAndHip(out float leftMagnet, out float rightMagnet, out float hipMaxOffset)
+        {
+            leftMagnet = CurrentLeftFootMagnet;
+            rightMagnet = CurrentRightFootMagnet;
+            hipMaxOffset = CurrentHipMaxOffset;
+        }
 
         private void UpdateFootAndHipFromCurves()
         {
-            CurrentLeftFootMagnet = 0f;
-            CurrentRightFootMagnet = 0f;
-            CurrentHipMaxOffset = 0f;
-
             var clips = _profile.RuntimeClips;
-            if (clips == null || _lastWeights == null)
+            int count = clips != null ? clips.Length : 0;
+            if (count == 0 || _lastWeights == null || _lastWeights.Length == 0)
             {
+                CurrentLeftFootMagnet = 0f;
+                CurrentRightFootMagnet = 0f;
+                CurrentHipMaxOffset = 0f;
                 return;
             }
 
-            int count = Mathf.Min(clips.Length, _clipPlayables.Length, _lastWeights.Length);
-            const float eps = 1e-5f;
+            const float eps = 1e-6f;
 
             float baseLeft = 0f;
             float baseRight = 0f;
             float baseHip = 0f;
 
-            // Базовый слой: idle + moves
             for (int i = 0; i < count; i++)
             {
-                float w = _lastWeights[i];
+                float w = i < _lastWeights.Length ? _lastWeights[i] : 0f;
                 if (w <= eps)
                 {
                     continue;
@@ -419,9 +605,7 @@ namespace AlSo
 
                 double time = playable.GetTime();
                 float len = clip.length;
-                float localTime = len > 0f
-                    ? (float)(time % len)
-                    : 0f;
+                float localTime = len > 0f ? (float)(time % len) : 0f;
 
                 AnimationCurve lfCurve = null;
                 AnimationCurve rfCurve = null;
@@ -432,9 +616,9 @@ namespace AlSo
                     var idle = _profile.idle;
                     if (idle != null)
                     {
-                        lfCurve = idle.LeftFootMagnet;
-                        rfCurve = idle.RightFootMagnet;
-                        hipCurve = idle.HipMaxOffset;
+                        lfCurve = idle.leftFootMagnet;
+                        rfCurve = idle.rightFootMagnet;
+                        hipCurve = idle.hipMaxOffset;
                     }
                 }
                 else
@@ -447,9 +631,9 @@ namespace AlSo
                         var move = _profile.moves[moveIndex];
                         if (move != null)
                         {
-                            lfCurve = move.LeftFootMagnet;
-                            rfCurve = move.RightFootMagnet;
-                            hipCurve = move.HipMaxOffset;
+                            lfCurve = move.leftFootMagnet;
+                            rfCurve = move.rightFootMagnet;
+                            hipCurve = move.hipMaxOffset;
                         }
                     }
                 }
@@ -467,7 +651,6 @@ namespace AlSo
             float finalRight = baseRight;
             float finalHip = baseHip;
 
-            // Экшен поверх локомоушена
             if (_currentActionData != null &&
                 _actionPlayable.IsValid() &&
                 _currentActionData.Clip != null &&
@@ -476,9 +659,7 @@ namespace AlSo
             {
                 float len = _currentActionData.Clip.length;
                 double t = _actionPlayable.GetTime();
-                float localTime = len > 0f
-                    ? (float)(t % len)
-                    : 0f;
+                float localTime = len > 0f ? (float)(t % len) : 0f;
 
                 float actLeft = EvaluateCurve(_currentActionData.LeftFootMagnet, localTime);
                 float actRight = EvaluateCurve(_currentActionData.RightFootMagnet, localTime);
@@ -504,157 +685,6 @@ namespace AlSo
             }
 
             return curve.Evaluate(time);
-        }
-
-        // Внешнему коду удобно дёргать так
-        public void EvaluateFootAndHip(out float left, out float right, out float hip)
-        {
-            left = CurrentLeftFootMagnet;
-            right = CurrentRightFootMagnet;
-            hip = CurrentHipMaxOffset;
-        }
-
-        public void Destroy()
-        {
-            if (_graph.IsValid())
-            {
-                _graph.Destroy();
-            }
-        }
-
-        //public void UpdateLocomotion(Vector2 speed)
-
-        public void UpdateLocomotion(Vector2 speed)
-        {
-            UpdateLocomotion(speed, Time.deltaTime);
-        }
-
-        public void UpdateLocomotion(Vector2 speed, float dt)
-        {
-            if (!_graph.IsValid())
-            {
-                return;
-            }
-
-            var clips = _profile.RuntimeClips;
-            if (clips == null || clips.Length == 0)
-            {
-                return;
-            }
-
-            float[] weights = _weightCalculator.GetWeights(speed);
-            if (weights == null || weights.Length == 0)
-            {
-                return;
-            }
-
-            int mixerInputs = _locomotionMixer.GetInputCount();
-            int count = Mathf.Min(weights.Length, mixerInputs);
-
-            if (_lastWeights == null || _lastWeights.Length != weights.Length)
-            {
-                _lastWeights = new float[weights.Length];
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                float w = weights[i];
-                _lastWeights[i] = w;
-                _locomotionMixer.SetInputWeight(i, w);
-            }
-
-            for (int i = count; i < mixerInputs; i++)
-            {
-                _locomotionMixer.SetInputWeight(i, 0f);
-            }
-
-            UpdateAction(dt);
-            UpdateFootAndHipFromCurves();
-        }
-
-        public void EvaluateGraph(float deltaTime)
-        {
-            if (!_graph.IsValid())
-            {
-                return;
-            }
-
-            // Важно: даже Evaluate(0) полезен для скраба (проталкивает сэмплинг).
-            _graph.Evaluate(deltaTime);
-        }
-
-        /// <summary>
-        /// Для Timeline/скраба: выставляет абсолютное время фазы для всех locomotion-клипов (idle+moves).
-        /// Это нужно, чтобы при скраббинге ноги/кривые попадали в нужный кадр, даже если deltaTime=0.
-        /// </summary>
-        public void SetAbsoluteTime(double timeSeconds)
-        {
-            if (!_graph.IsValid())
-            {
-                return;
-            }
-
-            if (_clipPlayables == null || _clipPlayables.Length == 0)
-            {
-                return;
-            }
-
-            var clips = _profile.RuntimeClips;
-            if (clips == null || clips.Length == 0)
-            {
-                return;
-            }
-
-            int count = Mathf.Min(clips.Length, _clipPlayables.Length);
-
-            for (int i = 0; i < count; i++)
-            {
-                var clip = clips[i];
-                if (clip == null)
-                {
-                    continue;
-                }
-
-                var p = _clipPlayables[i];
-                if (!p.IsValid())
-                {
-                    continue;
-                }
-
-                double len = clip.length;
-                if (len <= 0.0)
-                {
-                    p.SetTime(0.0);
-                    continue;
-                }
-
-                // Фаза по кругу + (опционально) cycleOffset, если ты когда-нибудь включишь _useCycleOffsetPhase.
-                double t = timeSeconds % len;
-
-                double offset = 0.0;
-                if (_useCycleOffsetPhase && _cycleOffsets != null && i >= 0 && i < _cycleOffsets.Length)
-                {
-                    offset = _cycleOffsets[i] * len;
-                }
-
-                p.SetTime(offset + t);
-            }
-
-            // Опционально: если сейчас играет action-слой — тоже синхронизируем фазу.
-            // Это НЕ управляет fade state/логикой _actionTime, только ставит время клипа.
-            if (_currentActionData != null && _currentActionData.Clip != null && _actionPlayable.IsValid())
-            {
-                double len = _currentActionData.Clip.length;
-                if (len > 0.0)
-                {
-                    double t = timeSeconds % len;
-                    _actionPlayable.SetTime(t);
-                }
-                else
-                {
-                    _actionPlayable.SetTime(0.0);
-                }
-            }
         }
     }
 }

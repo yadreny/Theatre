@@ -72,65 +72,58 @@ namespace AlSo
 
         public LocomotionSystem Locomotion => _locomotion;
 
+        // ВАЖНО: когда true — управление скоростью/экшенами идёт от Timeline, Update() не вмешивается.
+        [ShowInInspector, ReadOnly]
+        public bool TimelineDriven { get; private set; }
+
         // Odin helpers для показа полей
         private bool ShowCartesianSpeedFields => !useInput && !usePolarInput;
         private bool ShowPolarSpeedFields => !useInput && usePolarInput;
 
         private void Awake()
         {
-            // Важно для Timeline/скраба: Awake в Edit Mode может дергаться неоднозначно,
-            // поэтому НЕ создаём/не пересоздаём локомоушен здесь.
+            _locomotion = null;
             _animator = GetComponent<Animator>();
-        }
 
-        private void OnEnable()
-        {
-            EnsureLocomotionCreated();
-        }
-
-        private void OnDisable()
-        {
-#if UNITY_EDITOR
-            // В Edit Mode освобождаем граф, чтобы не оставлять висячие PlayableGraph'ы.
-            if (!Application.isPlaying)
+            if (profile != null)
             {
-                ReleaseLocomotion();
+                _locomotion = profile.CreateLocomotion(_animator);
             }
-#endif
+            else
+            {
+                UnityEngine.Debug.LogError("[LocomotionProfileTest] Profile is not assigned.");
+            }
         }
 
         private void Update()
         {
-            // В Edit Mode Update тоже вызывается из-за ExecuteAlways,
-            // но для Timeline мы НЕ хотим тут трогать скорость/инпут и перетирать управление.
-            if (!Application.isPlaying)
-            {
-                return;
-            }
-
             if (_locomotion == null)
-            {
                 return;
-            }
+
+            // Ключевой фикс: если Timeline сейчас ведёт — не затираем его работу.
+            if (TimelineDriven)
+                return;
+
+#if UNITY_EDITOR
+            // В Edit Mode без Timeline управления — тоже не гоняем Input.
+            if (!Application.isPlaying)
+                return;
+#endif
 
             // --------- выбираем источник скорости ---------
             Vector2 speed;
 
             if (useInput)
             {
-                // Классический режим: WASD / Arrow keys
                 float x = Input.GetAxisRaw("Horizontal");
                 float z = Input.GetAxisRaw("Vertical");
                 speed = new Vector2(x, z);
             }
             else if (usePolarInput)
             {
-                // Полярный режим: модуль + угол
                 float mag = speedMagnitude;
                 float angleRad = speedAngleDeg * Mathf.Deg2Rad;
 
-                // 0° = вперёд (по Z+)
-                // X = вправо, Z = вперёд
                 float x = Mathf.Sin(angleRad) * mag;
                 float z = Mathf.Cos(angleRad) * mag;
 
@@ -138,41 +131,32 @@ namespace AlSo
             }
             else
             {
-                // Старый ручной режим X/Z
                 speed = new Vector2(speedX, speedZ);
             }
 
             debugSpeed = speed;
 
-            // кастомный локомоушен (PlayableGraph + Mixer)
             _locomotion.UpdateLocomotion(speed);
 
-            // параллельно — Unity BlendTree
             if (unityBlendTreeAnimator != null)
             {
                 if (!string.IsNullOrEmpty(unitySpeedXParam))
-                {
                     unityBlendTreeAnimator.SetFloat(unitySpeedXParam, speed.x);
-                }
 
                 if (!string.IsNullOrEmpty(unitySpeedZParam))
-                {
                     unityBlendTreeAnimator.SetFloat(unitySpeedZParam, speed.y);
-                }
             }
 
-            // запуск атаки по Q
             if (Input.GetKeyDown(KeyCode.Q))
             {
                 if (attackClip != null)
                 {
+                    // Вручную — как раньше
                     _locomotion.PerformClip(attackClip, 0.1f, 0.1f);
                     UnityEngine.Debug.Log("[LocomotionProfileTest] Q pressed: PerformClip(attackClip).");
 
                     if (unityBlendTreeAnimator != null)
-                    {
                         unityBlendTreeAnimator.SetTrigger("Fire");
-                    }
                 }
                 else
                 {
@@ -183,29 +167,24 @@ namespace AlSo
 
         private void OnDestroy()
         {
-            // Важно: Destroy вызывается и в Play, и в Edit (при удалении/пересборке сцены).
-            ReleaseLocomotion();
+            if (_locomotion != null)
+            {
+                _locomotion.Destroy();
+                _locomotion = null;
+            }
         }
 
         private void OnDrawGizmos()
         {
             if (!drawGizmo)
-            {
                 return;
-            }
 
-            // Оставил как было: гизмо только в Play Mode.
-            // Если захочешь — можно убрать этот ранний return и рисовать в Edit Mode тоже.
             if (!Application.isPlaying)
-            {
                 return;
-            }
 
             Vector3 v = new Vector3(debugSpeed.x, 0f, debugSpeed.y);
             if (v.sqrMagnitude < 0.0001f)
-            {
                 return;
-            }
 
             Vector3 origin = transform.position;
             Vector3 dir = v * gizmoScale;
@@ -231,9 +210,58 @@ namespace AlSo
             }
         }
 
-        /// <summary>
-        /// Важно для Timeline/скраба: миксер может вызывать это перед UpdateLocomotion.
-        /// </summary>
+        // ==== Timeline API ====
+
+        public void SetTimelineDriven(bool driven)
+        {
+            TimelineDriven = driven;
+        }
+
+        public void PerformAction(AnimationActionClipData actionData)
+        {
+            EnsureLocomotionCreated();
+
+            if (_locomotion == null)
+            {
+                UnityEngine.Debug.LogWarning("[LocomotionProfileTest] PerformAction: locomotion is null.");
+                return;
+            }
+
+            if (actionData == null || actionData.Clip == null)
+            {
+                UnityEngine.Debug.LogWarning("[LocomotionProfileTest] PerformAction: actionData or Clip is null.");
+                return;
+            }
+
+            // стопаем скорость (чтобы не “дотаптывал”)
+            debugSpeed = Vector2.zero;
+            _locomotion.UpdateLocomotion(Vector2.zero);
+
+            // fade по процентам
+            float len = actionData.Clip.length;
+            float fadeIn = Mathf.Clamp01(actionData.FadeInPercent) * len;
+            float fadeOut = Mathf.Clamp01(actionData.FadeOutPercent) * len;
+
+            _locomotion.PerformClip(actionData.Clip, fadeIn, fadeOut);
+        }
+
+        // ==== Ensure for Edit Mode / Timeline ====
+
+        private void OnEnable()
+        {
+            EnsureLocomotionCreated();
+        }
+
+        private void OnDisable()
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                ReleaseLocomotion();
+            }
+#endif
+        }
+
         public void EnsureLocomotionCreated()
         {
             if (_animator == null)
@@ -248,18 +276,13 @@ namespace AlSo
 
             if (profile == null || _animator == null)
             {
-                // В редакторе профиль может быть ещё не назначен/перекомпилируется — не спамим.
-                if (Application.isPlaying)
-                {
-                    UnityEngine.Debug.LogError("[LocomotionProfileTest] Profile is not assigned.");
-                }
                 return;
             }
 
             _locomotion = profile.CreateLocomotion(_animator);
         }
 
-        public void ReleaseLocomotion()
+        private void ReleaseLocomotion()
         {
             if (_locomotion == null)
             {
