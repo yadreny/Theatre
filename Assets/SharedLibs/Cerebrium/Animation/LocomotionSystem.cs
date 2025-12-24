@@ -1,6 +1,8 @@
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
+using Codice.CM.Common;
+
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -135,48 +137,48 @@ namespace AlSo
             _graph.Play();
         }
 
-        public void UpdateLocomotion(Vector2 speed)
-        {
-            if (!_graph.IsValid())
-            {
-                return;
-            }
+        //public void UpdateLocomotion(Vector2 speed)
+        //{
+        //    if (!_graph.IsValid())
+        //    {
+        //        return;
+        //    }
 
-            var clips = _profile.RuntimeClips;
-            if (clips == null || clips.Length == 0)
-            {
-                return;
-            }
+        //    var clips = _profile.RuntimeClips;
+        //    if (clips == null || clips.Length == 0)
+        //    {
+        //        return;
+        //    }
 
-            float[] weights = _weightCalculator.GetWeights(speed);
-            if (weights == null || weights.Length == 0)
-            {
-                return;
-            }
+        //    float[] weights = _weightCalculator.GetWeights(speed);
+        //    if (weights == null || weights.Length == 0)
+        //    {
+        //        return;
+        //    }
 
-            int mixerInputs = _locomotionMixer.GetInputCount();
-            int count = Mathf.Min(weights.Length, mixerInputs);
+        //    int mixerInputs = _locomotionMixer.GetInputCount();
+        //    int count = Mathf.Min(weights.Length, mixerInputs);
 
-            if (_lastWeights == null || _lastWeights.Length != weights.Length)
-            {
-                _lastWeights = new float[weights.Length];
-            }
+        //    if (_lastWeights == null || _lastWeights.Length != weights.Length)
+        //    {
+        //        _lastWeights = new float[weights.Length];
+        //    }
 
-            for (int i = 0; i < count; i++)
-            {
-                float w = weights[i];
-                _lastWeights[i] = w;
-                _locomotionMixer.SetInputWeight(i, w);
-            }
+        //    for (int i = 0; i < count; i++)
+        //    {
+        //        float w = weights[i];
+        //        _lastWeights[i] = w;
+        //        _locomotionMixer.SetInputWeight(i, w);
+        //    }
 
-            for (int i = count; i < mixerInputs; i++)
-            {
-                _locomotionMixer.SetInputWeight(i, 0f);
-            }
+        //    for (int i = count; i < mixerInputs; i++)
+        //    {
+        //        _locomotionMixer.SetInputWeight(i, 0f);
+        //    }
 
-            UpdateAction(Time.deltaTime);
-            UpdateFootAndHipFromCurves();
-        }
+        //    UpdateAction(Time.deltaTime);
+        //    UpdateFootAndHipFromCurves();
+        //}
 
         // --- Ёкшены ---
 
@@ -517,6 +519,141 @@ namespace AlSo
             if (_graph.IsValid())
             {
                 _graph.Destroy();
+            }
+        }
+
+        //public void UpdateLocomotion(Vector2 speed)
+
+        public void UpdateLocomotion(Vector2 speed)
+        {
+            UpdateLocomotion(speed, Time.deltaTime);
+        }
+
+        public void UpdateLocomotion(Vector2 speed, float dt)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            var clips = _profile.RuntimeClips;
+            if (clips == null || clips.Length == 0)
+            {
+                return;
+            }
+
+            float[] weights = _weightCalculator.GetWeights(speed);
+            if (weights == null || weights.Length == 0)
+            {
+                return;
+            }
+
+            int mixerInputs = _locomotionMixer.GetInputCount();
+            int count = Mathf.Min(weights.Length, mixerInputs);
+
+            if (_lastWeights == null || _lastWeights.Length != weights.Length)
+            {
+                _lastWeights = new float[weights.Length];
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                float w = weights[i];
+                _lastWeights[i] = w;
+                _locomotionMixer.SetInputWeight(i, w);
+            }
+
+            for (int i = count; i < mixerInputs; i++)
+            {
+                _locomotionMixer.SetInputWeight(i, 0f);
+            }
+
+            UpdateAction(dt);
+            UpdateFootAndHipFromCurves();
+        }
+
+        public void EvaluateGraph(float deltaTime)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            // ¬ажно: даже Evaluate(0) полезен дл€ скраба (проталкивает сэмплинг).
+            _graph.Evaluate(deltaTime);
+        }
+
+        /// <summary>
+        /// ƒл€ Timeline/скраба: выставл€ет абсолютное врем€ фазы дл€ всех locomotion-клипов (idle+moves).
+        /// Ёто нужно, чтобы при скраббинге ноги/кривые попадали в нужный кадр, даже если deltaTime=0.
+        /// </summary>
+        public void SetAbsoluteTime(double timeSeconds)
+        {
+            if (!_graph.IsValid())
+            {
+                return;
+            }
+
+            if (_clipPlayables == null || _clipPlayables.Length == 0)
+            {
+                return;
+            }
+
+            var clips = _profile.RuntimeClips;
+            if (clips == null || clips.Length == 0)
+            {
+                return;
+            }
+
+            int count = Mathf.Min(clips.Length, _clipPlayables.Length);
+
+            for (int i = 0; i < count; i++)
+            {
+                var clip = clips[i];
+                if (clip == null)
+                {
+                    continue;
+                }
+
+                var p = _clipPlayables[i];
+                if (!p.IsValid())
+                {
+                    continue;
+                }
+
+                double len = clip.length;
+                if (len <= 0.0)
+                {
+                    p.SetTime(0.0);
+                    continue;
+                }
+
+                // ‘аза по кругу + (опционально) cycleOffset, если ты когда-нибудь включишь _useCycleOffsetPhase.
+                double t = timeSeconds % len;
+
+                double offset = 0.0;
+                if (_useCycleOffsetPhase && _cycleOffsets != null && i >= 0 && i < _cycleOffsets.Length)
+                {
+                    offset = _cycleOffsets[i] * len;
+                }
+
+                p.SetTime(offset + t);
+            }
+
+            // ќпционально: если сейчас играет action-слой Ч тоже синхронизируем фазу.
+            // Ёто Ќ≈ управл€ет fade state/логикой _actionTime, только ставит врем€ клипа.
+            if (_currentActionData != null && _currentActionData.clip != null && _actionPlayable.IsValid())
+            {
+                double len = _currentActionData.clip.length;
+                if (len > 0.0)
+                {
+                    double t = timeSeconds % len;
+                    _actionPlayable.SetTime(t);
+                }
+                else
+                {
+                    _actionPlayable.SetTime(0.0);
+                }
             }
         }
     }
