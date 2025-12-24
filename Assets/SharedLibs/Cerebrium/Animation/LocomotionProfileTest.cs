@@ -3,6 +3,9 @@ using UnityEngine;
 
 namespace AlSo
 {
+#if UNITY_EDITOR
+    [ExecuteAlways]
+#endif
     [RequireComponent(typeof(Animator))]
     public class LocomotionProfileTest : SerializedMonoBehaviour
     {
@@ -75,23 +78,40 @@ namespace AlSo
 
         private void Awake()
         {
-            _locomotion = null;
+            // Важно для Timeline/скраба: Awake в Edit Mode может дергаться неоднозначно,
+            // поэтому НЕ создаём/не пересоздаём локомоушен здесь.
             _animator = GetComponent<Animator>();
+        }
 
-            if (profile != null)
+        private void OnEnable()
+        {
+            EnsureLocomotionCreated();
+        }
+
+        private void OnDisable()
+        {
+#if UNITY_EDITOR
+            // В Edit Mode освобождаем граф, чтобы не оставлять висячие PlayableGraph'ы.
+            if (!Application.isPlaying)
             {
-                _locomotion = profile.CreateLocomotion(_animator);
+                ReleaseLocomotion();
             }
-            else
-            {
-                UnityEngine.Debug.LogError("[LocomotionProfileTest] Profile is not assigned.");
-            }
+#endif
         }
 
         private void Update()
         {
-            if (_locomotion == null)
+            // В Edit Mode Update тоже вызывается из-за ExecuteAlways,
+            // но для Timeline мы НЕ хотим тут трогать скорость/инпут и перетирать управление.
+            if (!Application.isPlaying)
+            {
                 return;
+            }
+
+            if (_locomotion == null)
+            {
+                return;
+            }
 
             // --------- выбираем источник скорости ---------
             Vector2 speed;
@@ -131,10 +151,14 @@ namespace AlSo
             if (unityBlendTreeAnimator != null)
             {
                 if (!string.IsNullOrEmpty(unitySpeedXParam))
+                {
                     unityBlendTreeAnimator.SetFloat(unitySpeedXParam, speed.x);
+                }
 
                 if (!string.IsNullOrEmpty(unitySpeedZParam))
+                {
                     unityBlendTreeAnimator.SetFloat(unitySpeedZParam, speed.y);
+                }
             }
 
             // запуск атаки по Q
@@ -146,7 +170,9 @@ namespace AlSo
                     UnityEngine.Debug.Log("[LocomotionProfileTest] Q pressed: PerformClip(attackClip).");
 
                     if (unityBlendTreeAnimator != null)
+                    {
                         unityBlendTreeAnimator.SetTrigger("Fire");
+                    }
                 }
                 else
                 {
@@ -157,24 +183,29 @@ namespace AlSo
 
         private void OnDestroy()
         {
-            if (_locomotion != null)
-            {
-                _locomotion.Destroy();
-                _locomotion = null;
-            }
+            // Важно: Destroy вызывается и в Play, и в Edit (при удалении/пересборке сцены).
+            ReleaseLocomotion();
         }
 
         private void OnDrawGizmos()
         {
             if (!drawGizmo)
+            {
                 return;
+            }
 
+            // Оставил как было: гизмо только в Play Mode.
+            // Если захочешь — можно убрать этот ранний return и рисовать в Edit Mode тоже.
             if (!Application.isPlaying)
+            {
                 return;
+            }
 
             Vector3 v = new Vector3(debugSpeed.x, 0f, debugSpeed.y);
             if (v.sqrMagnitude < 0.0001f)
+            {
                 return;
+            }
 
             Vector3 origin = transform.position;
             Vector3 dir = v * gizmoScale;
@@ -198,6 +229,45 @@ namespace AlSo
                 Gizmos.DrawLine(end, end + left * headLength * gizmoScale);
                 Gizmos.DrawLine(end, end + right * headLength * gizmoScale);
             }
+        }
+
+        /// <summary>
+        /// Важно для Timeline/скраба: миксер может вызывать это перед UpdateLocomotion.
+        /// </summary>
+        public void EnsureLocomotionCreated()
+        {
+            if (_animator == null)
+            {
+                _animator = GetComponent<Animator>();
+            }
+
+            if (_locomotion != null)
+            {
+                return;
+            }
+
+            if (profile == null || _animator == null)
+            {
+                // В редакторе профиль может быть ещё не назначен/перекомпилируется — не спамим.
+                if (Application.isPlaying)
+                {
+                    UnityEngine.Debug.LogError("[LocomotionProfileTest] Profile is not assigned.");
+                }
+                return;
+            }
+
+            _locomotion = profile.CreateLocomotion(_animator);
+        }
+
+        public void ReleaseLocomotion()
+        {
+            if (_locomotion == null)
+            {
+                return;
+            }
+
+            _locomotion.Destroy();
+            _locomotion = null;
         }
     }
 }

@@ -79,11 +79,20 @@ namespace AlSo
         private Vector3 _basePos;
         private Quaternion _baseRot;
 
+        // FIX: чтобы на WrapMode=Hold (и вообще когда playhead стоит на месте) не “шёл на месте”
+        private bool _hasPrevTime;
+        private double _prevTrackTime;
+
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
             var locomotionTest = playerData as LocomotionProfileTest;
             if (locomotionTest == null)
+            {
                 return;
+            }
+
+            // Важно для скраба: гарантируем наличие LocomotionSystem в Edit Mode
+            locomotionTest.EnsureLocomotionCreated();
 
             var tr = locomotionTest.transform;
 
@@ -109,7 +118,7 @@ namespace AlSo
             Vector2 speedAcc = Vector2.zero;
             bool anySpeed = false;
 
-            double trackTime = playable.GetTime(); // время Timeline (для фазы)
+            double trackTime = playable.GetTime(); // время Timeline
 
             for (int i = 0; i < inputCount; i++)
             {
@@ -178,24 +187,42 @@ namespace AlSo
                 sumW += w;
             }
 
+            // Если нет активных клипов — вернём позу и отдадим 0-скорость
             if (sumW <= eps)
             {
 #if UNITY_EDITOR
-                // в editor preview, если клипов нет — вернём позу (чтобы не “залипало” после скраба)
                 if (!Application.isPlaying)
                 {
-                    tr.position = _basePos;
-                    tr.rotation = _baseRot;
+                    // Откатываем только если реально ушли в начало (иначе мешает Hold’у)
+                    if (trackTime <= 0.0001)
+                    {
+                        tr.position = _basePos;
+                        tr.rotation = _baseRot;
+                    }
                 }
 #endif
-                // и в локомоушен даём 0
+
                 var loco0 = locomotionTest.Locomotion;
                 if (loco0 != null)
                 {
-                    loco0.UpdateLocomotion(Vector2.zero, info.deltaTime);
                     loco0.SetAbsoluteTime(trackTime);
-                    loco0.EvaluateGraph(0f);
+                    loco0.UpdateLocomotion(Vector2.zero);
+
+#if UNITY_EDITOR
+                    if (!Application.isPlaying)
+                    {
+                        loco0.EvaluateGraph(0f);
+                    }
+#endif
                 }
+
+#if UNITY_EDITOR
+                if (!Application.isPlaying)
+                {
+                    _prevTrackTime = trackTime;
+                    _hasPrevTime = true;
+                }
+#endif
                 return;
             }
 
@@ -203,7 +230,6 @@ namespace AlSo
 
             if (anyPos)
             {
-                // добавляем “базу” при неполном весе (плавные края клипа)
                 float baseW = Mathf.Clamp01(1f - sumW);
                 Vector3 finalPos = (posAcc * inv) * sumW + _basePos * baseW;
                 tr.position = finalPos;
@@ -211,19 +237,41 @@ namespace AlSo
 
             if (anyRot)
             {
-                float baseW = Mathf.Clamp01(1f - sumW);
                 Quaternion finalRot = Quaternion.Slerp(_baseRot, rotAcc, sumW);
-                tr.rotation = baseW > 0f ? Quaternion.Slerp(_baseRot, finalRot, 1f - baseW) : finalRot;
+                tr.rotation = finalRot;
             }
 
             Vector2 finalSpeed = anySpeed ? (speedAcc * inv) : Vector2.zero;
 
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                // FIX: если playhead стоит на месте (Hold / пауза / просто не проигрываем),
+                // скорость = 0, чтобы ноги не "шли на месте".
+                if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
+                {
+                    finalSpeed = Vector2.zero;
+                }
+
+                _prevTrackTime = trackTime;
+                _hasPrevTime = true;
+            }
+#endif
+
             var loco = locomotionTest.Locomotion;
             if (loco != null)
             {
-                loco.UpdateLocomotion(finalSpeed, info.deltaTime);
+                // ВАЖНО: сначала выставляем время клипов, потом UpdateLocomotion (он сэмплит кривые ног/hip)
                 loco.SetAbsoluteTime(trackTime);
-                loco.EvaluateGraph(0f);
+                loco.UpdateLocomotion(finalSpeed);
+
+#if UNITY_EDITOR
+                // В Edit Mode Unity сама не тикает твой отдельный PlayableGraph — проталкиваем руками
+                if (!Application.isPlaying)
+                {
+                    loco.EvaluateGraph(0f);
+                }
+#endif
             }
         }
 
@@ -283,7 +331,7 @@ namespace AlSo
         public override void OnPlayableDestroy(Playable playable)
         {
             _cached = false;
+            _hasPrevTime = false;
         }
     }
-
 }
