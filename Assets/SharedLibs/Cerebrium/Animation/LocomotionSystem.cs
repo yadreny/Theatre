@@ -246,8 +246,8 @@ namespace AlSo
                 return;
             }
 
-            float fadeIn = Mathf.Max(0f, action.fadeInPercent) * len;
-            float fadeOut = Mathf.Max(0f, action.fadeOutPercent) * len;
+            float fadeIn = Mathf.Max(0f, action.FadeInPercent) * len;
+            float fadeOut = Mathf.Max(0f, action.FadeOutPercent) * len;
 
             _currentActionData = action;
             PerformClip(action.Clip, fadeIn, fadeOut);

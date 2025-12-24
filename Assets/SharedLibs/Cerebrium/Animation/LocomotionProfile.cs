@@ -88,7 +88,7 @@ namespace AlSo
             for (int i = 0; i < actions.Length; i++)
             {
                 AnimationActionClip a = actions[i];
-                if (a != null && a.Clip != null && a.name == name)
+                if (a != null && a.Clip != null && a.Name == name)
                 {
                     return a;
                 }

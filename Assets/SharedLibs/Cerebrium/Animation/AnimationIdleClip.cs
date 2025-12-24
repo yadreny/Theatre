@@ -15,6 +15,15 @@ namespace AlSo
         public float RightLegYDelta { get; set; }
     }
 
+    public interface IAnimationActionClip : IAnimationClip
+    {
+        public string Name { get; }
+
+        public float FadeInPercent { get; }
+        public float FadeOutPercent { get; }
+    }
+
+
     [Serializable]
     public class AbsAnimationClip : IAnimationClip
     {
@@ -75,12 +84,19 @@ namespace AlSo
     {
     }
 
+
+
+
     [Serializable]
-    public class AnimationActionClip : AbsAnimationClip
+    public class AnimationActionClip : AbsAnimationClip, IAnimationActionClip
     {
         public string name;
+        public string Name => name;
 
         public float fadeInPercent = 0.1f;
+        public float FadeInPercent => fadeInPercent;
+
         public float fadeOutPercent = 0.1f;
+        public float FadeOutPercent => fadeOutPercent;
     }
 }
