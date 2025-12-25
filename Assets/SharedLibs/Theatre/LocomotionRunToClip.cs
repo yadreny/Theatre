@@ -32,9 +32,15 @@ namespace AlSo
             var playable = ScriptPlayable<LocomotionRunToBehaviour>.Create(graph);
             var b = playable.GetBehaviour();
 
+            // КЛЮЧЕВОЕ:
+            // Unity может менять exposedName при изменении ссылки в инспекторе.
+            // Поэтому мы сохраняем ссылку на ассет клипа и читаем exposedName каждый ProcessFrame.
+            b.Asset = this;
+
+            // Фолбэк: при сборке графа один раз резолвим, но это только запасной вариант.
             var r = graph.GetResolver();
-            b.From = from.Resolve(r);
-            b.To = to.Resolve(r);
+            b.FromFallback = from.Resolve(r);
+            b.ToFallback = to.Resolve(r);
 
             b.DrivePosition = drivePosition;
             b.DriveRotation = driveRotation;
@@ -50,8 +56,12 @@ namespace AlSo
 
     public class LocomotionRunToBehaviour : PlayableBehaviour
     {
-        public Transform From;
-        public Transform To;
+        // Ссылка на asset, чтобы каждый кадр брать актуальные exposedName.
+        public LocomotionRunToClip Asset;
+
+        // Фолбэки (на случай если exposed table недоступна).
+        public Transform FromFallback;
+        public Transform ToFallback;
 
         public bool DrivePosition;
         public bool DriveRotation;
@@ -145,7 +155,16 @@ namespace AlSo
 
             _locomotionTest.SetTimelineDriven(hasActive);
 
-            if (!hasActive || b == null || b.To == null)
+            // РЕЗОЛВИМ Актуальные from/to каждый кадр.
+            Transform fromTr = null;
+            Transform toTr = null;
+
+            if (hasActive && b != null)
+            {
+                ResolveFromTo(playable, b, out fromTr, out toTr);
+            }
+
+            if (!hasActive || b == null || toTr == null)
             {
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
@@ -180,11 +199,11 @@ namespace AlSo
                 nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
             }
 
-            Vector3 fromPos = b.From != null ? b.From.position : _basePos;
-            Quaternion fromRot = b.From != null ? b.From.rotation : _baseRot;
+            Vector3 fromPos = fromTr != null ? fromTr.position : _basePos;
+            Quaternion fromRot = fromTr != null ? fromTr.rotation : _baseRot;
 
-            Vector3 toPos = b.To.position;
-            Quaternion toRot = b.To.rotation;
+            Vector3 toPos = toTr.position;
+            Quaternion toRot = toTr.rotation;
 
             Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
             Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
@@ -229,6 +248,57 @@ namespace AlSo
 #endif
 
             loco.UpdateLocomotion(finalSpeed, info.deltaTime);
+        }
+
+        private void ResolveFromTo(Playable playable, LocomotionRunToBehaviour b, out Transform fromTr, out Transform toTr)
+        {
+            fromTr = b.FromFallback;
+            toTr = b.ToFallback;
+
+            var asset = b.Asset;
+            if (asset == null)
+            {
+                return;
+            }
+
+            // ВАЖНО: читаем актуальные ключи прямо из ассета (они могут поменяться при редактировании инспектора).
+            PropertyName fromKey = asset.from.exposedName;
+            PropertyName toKey = asset.to.exposedName;
+
+            var resolver = playable.GetGraph().GetResolver();
+            var table = resolver as IExposedPropertyTable;
+            if (table == null)
+            {
+                return;
+            }
+
+            if (fromKey != default)
+            {
+                bool valid;
+                var obj = table.GetReferenceValue(fromKey, out valid);
+                if (valid)
+                {
+                    var tr = obj as Transform;
+                    if (tr != null)
+                    {
+                        fromTr = tr;
+                    }
+                }
+            }
+
+            if (toKey != default)
+            {
+                bool valid;
+                var obj = table.GetReferenceValue(toKey, out valid);
+                if (valid)
+                {
+                    var tr = obj as Transform;
+                    if (tr != null)
+                    {
+                        toTr = tr;
+                    }
+                }
+            }
         }
 
         private static Vector2 ComputeSpeedVector2(

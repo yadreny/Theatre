@@ -64,6 +64,12 @@ namespace AlSo
         private bool _hasPrevTime;
         private double _prevTrackTime;
 
+        private struct RunToRefs
+        {
+            public Transform From;
+            public Transform To;
+        }
+
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
             if (!TryResolveTarget())
@@ -188,7 +194,13 @@ namespace AlSo
             // 3) RunTo (детерминированно от времени клипа)
             if (activeType == typeof(LocomotionRunToBehaviour))
             {
-                if (runB == null || runB.To == null)
+                if (runB == null)
+                {
+                    return;
+                }
+
+                RunToRefs refs = ResolveRunToRefs(playable, runB);
+                if (refs.To == null)
                 {
                     return;
                 }
@@ -204,11 +216,11 @@ namespace AlSo
                     nt = Mathf.Clamp01(runB.Curve.Evaluate(nt));
                 }
 
-                Vector3 fromPos = runB.From != null ? runB.From.position : _basePos;
-                Quaternion fromRot = runB.From != null ? runB.From.rotation : _baseRot;
+                Vector3 fromPos = refs.From != null ? refs.From.position : _basePos;
+                Quaternion fromRot = refs.From != null ? refs.From.rotation : _baseRot;
 
-                Vector3 toPos = runB.To.position;
-                Quaternion toRot = runB.To.rotation;
+                Vector3 toPos = refs.To.position;
+                Quaternion toRot = refs.To.rotation;
 
                 Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
                 Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
@@ -244,7 +256,6 @@ namespace AlSo
                 loco.ClearActionPreview();
 
                 // Синхронизируем фазу локомоции по ПРОЙДЕННОЙ ДИСТАНЦИИ, а не по времени таймлайна.
-                // Это делает PlayMode и Scrub максимально одинаковыми и исключает накопление ошибки при перемотке.
                 Vector3 planarDelta = toPos - fromPos;
                 planarDelta.y = 0f;
 
@@ -354,6 +365,60 @@ namespace AlSo
                 loco.EvaluateGraph(0f);
                 return;
             }
+        }
+
+        private RunToRefs ResolveRunToRefs(Playable playable, LocomotionRunToBehaviour b)
+        {
+            RunToRefs r = default;
+
+            // Фолбэки (если таблица недоступна)
+            r.From = b.FromFallback;
+            r.To = b.ToFallback;
+
+            if (b.Asset == null)
+            {
+                return r;
+            }
+
+            var resolver = playable.GetGraph().GetResolver();
+            var table = resolver as IExposedPropertyTable;
+            if (table == null)
+            {
+                return r;
+            }
+
+            PropertyName fromKey = b.Asset.from.exposedName;
+            PropertyName toKey = b.Asset.to.exposedName;
+
+            if (fromKey != default)
+            {
+                bool valid;
+                UnityEngine.Object obj = table.GetReferenceValue(fromKey, out valid);
+                if (valid)
+                {
+                    var tr = obj as Transform;
+                    if (tr != null)
+                    {
+                        r.From = tr;
+                    }
+                }
+            }
+
+            if (toKey != default)
+            {
+                bool valid;
+                UnityEngine.Object obj = table.GetReferenceValue(toKey, out valid);
+                if (valid)
+                {
+                    var tr = obj as Transform;
+                    if (tr != null)
+                    {
+                        r.To = tr;
+                    }
+                }
+            }
+
+            return r;
         }
 
         private static Vector2 ComputeSpeedVector2(
