@@ -1,0 +1,48 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a1b894e1cafd36d4cbd92472b106abfb, type: 3}
+  m_Name: LookAtRigSettings
+  m_EditorClassIdentifier: 
+  verticalFactor: 1
+  bones:
+  - bone: 10
+    forwardAxis: 2
+    upAxis: 1
+    parentForwardAxis: 2
+    parentUpAxis: 1
+    horizontalMaxDeg: 5
+    verticalMaxDeg: {x: -10, y: 20}
+    weight: 0.18421054
+  - bone: 9
+    forwardAxis: 2
+    upAxis: 1
+    parentForwardAxis: 2
+    parentUpAxis: 1
+    horizontalMaxDeg: 55
+    verticalMaxDeg: {x: -15, y: 35}
+    weight: 0.5526316
+  - bone: 8
+    forwardAxis: 2
+    upAxis: 1
+    parentForwardAxis: 2
+    parentUpAxis: 1
+    horizontalMaxDeg: 5
+    verticalMaxDeg: {x: -4, y: 8}
+    weight: 0.08947369
+  - bone: 7
+    forwardAxis: 2
+    upAxis: 1
+    parentForwardAxis: 2
+    parentUpAxis: 1
+    horizontalMaxDeg: 15
+    verticalMaxDeg: {x: -6, y: 12}
+    weight: 0.17368422
