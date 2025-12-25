@@ -22,9 +22,14 @@ namespace AlSo
         [Header("Target")]
         public Transform lookTarget;
 
-        [Header("Pivot")]
+        [Header("Pivot (eyes)")]
         [Min(0f)]
         public float headPivotUpOffset = 0.08f;
+
+        [Header("Close target stabilization")]
+        [Tooltip("Если planar (XZ) слишком маленький, yaw становится неопределённым. В этом случае берём XZ от более 'крупной' кости (Head->Neck->Chest...)")]
+        [Min(0f)]
+        public float yawUndefinedPlanarEps = 0.05f;
 
         [Header("Gizmo")]
         public bool drawGizmo = true;
@@ -42,19 +47,44 @@ namespace AlSo
         private Quaternion[] _restLocalRotations = Array.Empty<Quaternion>();
         private bool _restCaptured;
 
+        private float[] _tmpWeights = Array.Empty<float>();
+        private float[] _tmpYawApplied = Array.Empty<float>();
+        private float[] _tmpPitchApplied = Array.Empty<float>();
+
         private Vector3 _lastPivot;
         private Vector3 _lastLookDirWorld;
         private bool _hasLastLook;
+
+        // стабильный yaw, когда yaw неопределён (цель почти строго вверх/вниз относительно выбранной XZ-точки)
+        private bool _hasStableYaw;
+        private float _stableYawDeg;
 
 #if UNITY_EDITOR
         private double _nextLogTimeEditor;
 #endif
         private float _nextLogTimePlay;
 
+        private readonly struct PlanarPick
+        {
+            public readonly bool IsValid;
+            public readonly Vector2 DirXZ;   // нормализованный (x,z)
+            public readonly float Planar;    // длина XZ у НОРМАЛИЗОВАННОГО направления (0..1)
+
+            public PlanarPick(bool isValid, Vector2 dirXZ, float planar)
+            {
+                IsValid = isValid;
+                DirXZ = dirXZ;
+                Planar = planar;
+            }
+        }
+
         private void OnEnable()
         {
             EnsureSetup();
             CaptureRestPoseInternal();
+
+            _hasStableYaw = false;
+            _stableYawDeg = 0f;
 
 #if UNITY_EDITOR
             _nextLogTimeEditor = 0.0;
@@ -65,7 +95,7 @@ namespace AlSo
         private void LateUpdate()
         {
             EnsureSetup();
-            ApplyLook_NoAccumulation_NoDamp();
+            ApplyLook();
         }
 
         private void EnsureSetup()
@@ -87,16 +117,31 @@ namespace AlSo
 
             int count = settings.bones.Length;
 
-            if (_boneTransforms.Length != count)
+            bool needResize =
+                _boneTransforms.Length != count ||
+                _restLocalRotations.Length != count ||
+                _tmpWeights.Length != count ||
+                _tmpYawApplied.Length != count ||
+                _tmpPitchApplied.Length != count;
+
+            if (needResize)
             {
                 _boneTransforms = new Transform[count];
                 _restLocalRotations = new Quaternion[count];
+
+                _tmpWeights = new float[count];
+                _tmpYawApplied = new float[count];
+                _tmpPitchApplied = new float[count];
+
                 _restCaptured = false;
 
                 for (int i = 0; i < count; i++)
                 {
                     _boneTransforms[i] = null;
                     _restLocalRotations[i] = Quaternion.identity;
+                    _tmpWeights[i] = 0f;
+                    _tmpYawApplied[i] = 0f;
+                    _tmpPitchApplied[i] = 0f;
                 }
             }
 
@@ -156,7 +201,7 @@ namespace AlSo
             _restCaptured = true;
         }
 
-        private void ApplyLook_NoAccumulation_NoDamp()
+        private void ApplyLook()
         {
             _hasLastLook = false;
 
@@ -172,56 +217,68 @@ namespace AlSo
 
             if (lookTarget == null)
             {
-                // Ничего не делаем, не пытаемся "откатывать" — иначе будем бороться с позой аниматора.
                 return;
             }
 
             Transform head = animator.isHuman ? animator.GetBoneTransform(HumanBodyBones.Head) : null;
-
-            Vector3 pivot = head != null ? head.position : transform.position;
-            Vector3 pivotUp = head != null ? head.up : transform.up;
-
-            float pivotOffset = Mathf.Max(0f, headPivotUpOffset);
-            if (pivotOffset > 1e-6f)
-            {
-                pivot += pivotUp * pivotOffset;
-            }
-
-            Vector3 dirWorld = lookTarget.position - pivot;
-            if (dirWorld.sqrMagnitude <= 1e-10f)
+            if (head == null)
             {
                 return;
             }
 
-            Vector3 dirWorldN = dirWorld.normalized;
+            // ==== 1) PIVOT "ГЛАЗА" ====
+            Vector3 pivotEyes = head.position;
+            float pivotOffset = Mathf.Max(0f, headPivotUpOffset);
+            if (pivotOffset > 1e-6f)
+            {
+                pivotEyes += head.up * pivotOffset;
+            }
 
-            _lastPivot = pivot;
-            _lastLookDirWorld = dirWorldN;
+            Vector3 dirEyesW = lookTarget.position - pivotEyes;
+            if (dirEyesW.sqrMagnitude <= 1e-10f)
+            {
+                return;
+            }
+
+            Vector3 dirEyesWN = dirEyesW.normalized;
+
+            _lastPivot = pivotEyes;
+            _lastLookDirWorld = dirEyesWN;
             _hasLastLook = true;
 
-            // === углы относительно корпуса ===
-            Vector3 bodyUpW = bodyTransform.up;
+            // В локале корпуса (body): это главный “вертикальный” компонент
+            Vector3 dirEyesLocalN = bodyTransform.InverseTransformDirection(dirEyesWN);
 
-            Vector3 bodyForwardPlanar = Vector3.ProjectOnPlane(bodyTransform.forward, bodyUpW);
-            if (bodyForwardPlanar.sqrMagnitude <= 1e-10f)
-            {
-                bodyForwardPlanar = Vector3.ProjectOnPlane(Vector3.forward, bodyUpW);
-            }
-            bodyForwardPlanar.Normalize();
+            // ==== 2) XZ берём не обязательно от глаз: Head->Neck->Chest->Spine... ====
+            float eps = Mathf.Max(1e-6f, yawUndefinedPlanarEps);
 
-            Vector3 targetForwardPlanar = Vector3.ProjectOnPlane(dirWorldN, bodyUpW);
-            if (targetForwardPlanar.sqrMagnitude <= 1e-10f)
+            PlanarPick planarPick = PickPlanarFromFallbackChain(eps, lookTarget.position);
+
+            float yawDeg;
+            float planarForPitch;
+
+            if (planarPick.IsValid)
             {
-                targetForwardPlanar = bodyForwardPlanar;
+                yawDeg = Mathf.Atan2(planarPick.DirXZ.x, planarPick.DirXZ.y) * Mathf.Rad2Deg;
+                planarForPitch = planarPick.Planar;
+
+                _stableYawDeg = yawDeg;
+                _hasStableYaw = true;
             }
             else
             {
-                targetForwardPlanar.Normalize();
+                yawDeg = _hasStableYaw ? _stableYawDeg : 0f;
+                planarForPitch = eps;
             }
 
-            float yawDeg = Vector3.SignedAngle(bodyForwardPlanar, targetForwardPlanar, bodyUpW);
+            // ==== 3) pitch: Y от глаз, XZ от более стабильной точки ====
+            float yEyes = dirEyesLocalN.y;
+            float pitchDeg = -Mathf.Atan2(yEyes, Mathf.Max(1e-6f, planarForPitch)) * Mathf.Rad2Deg;
 
-            Vector3 rightAxis = Vector3.Cross(bodyUpW, targetForwardPlanar);
+            // ==== 4) ось pitch — стабильная (body.right, повернутый yaw’ом) ====
+            Vector3 bodyUpW = bodyTransform.up;
+            Quaternion yawRot = Quaternion.AngleAxis(yawDeg, bodyUpW);
+            Vector3 rightAxis = yawRot * bodyTransform.right;
             if (rightAxis.sqrMagnitude <= 1e-10f)
             {
                 rightAxis = bodyTransform.right;
@@ -231,9 +288,7 @@ namespace AlSo
                 rightAxis.Normalize();
             }
 
-            float pitchDeg = Vector3.SignedAngle(targetForwardPlanar, dirWorldN, rightAxis);
-            // pitchDeg: + вверх, - вниз
-
+            // ==== debug out-of-range ====
             if (logWhenOutOfRange)
             {
                 float maxYawTotal = 0f;
@@ -267,58 +322,49 @@ namespace AlSo
                 }
             }
 
-            // === распределяем одновременно по весам, но с лимитами ===
+            // ==== веса ====
             int n = settings.bones.Length;
 
-            float[] weights = new float[n];
             float wSum = 0f;
-
             for (int i = 0; i < n; i++)
             {
                 float w = Mathf.Max(0f, settings.bones[i].weight);
-                weights[i] = w;
+                _tmpWeights[i] = w;
                 wSum += w;
             }
 
             if (wSum <= 1e-8f)
             {
-                // fallback: равномерно
                 for (int i = 0; i < n; i++)
                 {
-                    weights[i] = 1f;
+                    _tmpWeights[i] = 1f;
                 }
 
                 wSum = Mathf.Max(1, n);
             }
 
-            float[] yawApplied = new float[n];
-            float[] pitchApplied = new float[n];
-
-            // initial shares
             for (int i = 0; i < n; i++)
             {
-                float s = weights[i] / wSum;
-                yawApplied[i] = yawDeg * s;
-                pitchApplied[i] = pitchDeg * s;
+                float s = _tmpWeights[i] / wSum;
+                _tmpYawApplied[i] = yawDeg * s;
+                _tmpPitchApplied[i] = pitchDeg * s;
             }
 
-            // clamp
             for (int i = 0; i < n; i++)
             {
                 float hMax = Mathf.Max(0f, settings.bones[i].horizontalMaxDeg);
-                yawApplied[i] = Mathf.Clamp(yawApplied[i], -hMax, +hMax);
+                _tmpYawApplied[i] = Mathf.Clamp(_tmpYawApplied[i], -hMax, +hMax);
 
                 Vector2 v = settings.bones[i].verticalMaxDeg;
                 float vMin = Mathf.Min(v.x, v.y);
                 float vMax = Mathf.Max(v.x, v.y);
-                pitchApplied[i] = Mathf.Clamp(pitchApplied[i], vMin, vMax);
+                _tmpPitchApplied[i] = Mathf.Clamp(_tmpPitchApplied[i], vMin, vMax);
             }
 
-            // redistribute leftovers iteratively (yaw and pitch separately)
-            RedistributeYaw(ref yawApplied, yawDeg, weights);
-            RedistributePitch(ref pitchApplied, pitchDeg, weights);
+            RedistributeYaw(yawDeg);
+            RedistributePitch(pitchDeg);
 
-            // === применяем без накопления: baseLocal + localDelta ===
+            // ==== применяем без накопления ====
             bool useRest = !Application.isPlaying;
             if (useRest && !_restCaptured)
             {
@@ -337,19 +383,17 @@ namespace AlSo
 
                 if (useRest && w <= 1e-6f)
                 {
-                    // В edit-mode вес 0 -> держим rest, чтобы не "залипало"
                     boneTr.localRotation = _restLocalRotations[i];
                     continue;
                 }
 
-                float y = yawApplied[i];
-                float p = pitchApplied[i];
+                float y = _tmpYawApplied[i];
+                float p = _tmpPitchApplied[i];
 
                 if (Mathf.Abs(y) <= 1e-6f && Mathf.Abs(p) <= 1e-6f)
                 {
                     if (useRest)
                     {
-                        // если edit-mode и угол 0 — явно ставим rest
                         boneTr.localRotation = _restLocalRotations[i];
                     }
 
@@ -358,7 +402,6 @@ namespace AlSo
 
                 Quaternion yawQ = Quaternion.AngleAxis(y, bodyUpW);
                 Quaternion pitchQ = Quaternion.AngleAxis(p, rightAxis);
-
                 Quaternion deltaWorld = pitchQ * yawQ;
 
                 Quaternion parentRot = boneTr.parent != null ? boneTr.parent.rotation : Quaternion.identity;
@@ -369,17 +412,79 @@ namespace AlSo
             }
         }
 
-        private void RedistributeYaw(ref float[] yawApplied, float yawTarget, float[] weights)
+        private PlanarPick PickPlanarFromFallbackChain(float eps, Vector3 targetWorldPos)
+        {
+            // Важно: тут мы намеренно берём XZ от "более стабильных" точек.
+            // Порядок можно менять под риг.
+            Transform head = animator.GetBoneTransform(HumanBodyBones.Head);
+            Transform neck = animator.GetBoneTransform(HumanBodyBones.Neck);
+            Transform upperChest = animator.GetBoneTransform(HumanBodyBones.UpperChest);
+            Transform chest = animator.GetBoneTransform(HumanBodyBones.Chest);
+            Transform spine = animator.GetBoneTransform(HumanBodyBones.Spine);
+            Transform hips = animator.GetBoneTransform(HumanBodyBones.Hips);
+
+            PlanarPick r;
+
+            r = SamplePlanarAtPivot(head, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            r = SamplePlanarAtPivot(neck, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            r = SamplePlanarAtPivot(upperChest, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            r = SamplePlanarAtPivot(chest, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            r = SamplePlanarAtPivot(spine, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            r = SamplePlanarAtPivot(hips, eps, targetWorldPos);
+            if (r.IsValid) return r;
+
+            return new PlanarPick(false, default, 0f);
+        }
+
+        private PlanarPick SamplePlanarAtPivot(Transform pivot, float eps, Vector3 targetWorldPos)
+        {
+            if (pivot == null)
+            {
+                return new PlanarPick(false, default, 0f);
+            }
+
+            Vector3 dirW = targetWorldPos - pivot.position;
+            if (dirW.sqrMagnitude <= 1e-10f)
+            {
+                return new PlanarPick(false, default, 0f);
+            }
+
+            Vector3 dirWN = dirW.normalized;
+            Vector3 dirLocalN = bodyTransform.InverseTransformDirection(dirWN);
+
+            Vector2 xz = new Vector2(dirLocalN.x, dirLocalN.z);
+            float planar = xz.magnitude;
+
+            if (planar < eps)
+            {
+                return new PlanarPick(false, default, 0f);
+            }
+
+            xz /= planar;
+            return new PlanarPick(true, xz, planar);
+        }
+
+        private void RedistributeYaw(float yawTarget)
         {
             const int iters = 8;
             const float eps = 1e-4f;
 
-            int n = yawApplied.Length;
+            int n = _tmpYawApplied.Length;
 
             for (int iter = 0; iter < iters; iter++)
             {
                 float sum = 0f;
-                for (int i = 0; i < n; i++) sum += yawApplied[i];
+                for (int i = 0; i < n; i++) sum += _tmpYawApplied[i];
 
                 float rem = yawTarget - sum;
                 if (Mathf.Abs(rem) <= eps)
@@ -396,13 +501,13 @@ namespace AlSo
 
                     if (positive)
                     {
-                        if (yawApplied[i] < hMax - eps)
-                            freeW += Mathf.Max(0f, weights[i]);
+                        if (_tmpYawApplied[i] < hMax - eps)
+                            freeW += Mathf.Max(0f, _tmpWeights[i]);
                     }
                     else
                     {
-                        if (yawApplied[i] > -hMax + eps)
-                            freeW += Mathf.Max(0f, weights[i]);
+                        if (_tmpYawApplied[i] > -hMax + eps)
+                            freeW += Mathf.Max(0f, _tmpWeights[i]);
                     }
                 }
 
@@ -414,46 +519,46 @@ namespace AlSo
                 for (int i = 0; i < n; i++)
                 {
                     float hMax = Mathf.Max(0f, settings.bones[i].horizontalMaxDeg);
-                    float wi = Mathf.Max(0f, weights[i]);
+                    float wi = Mathf.Max(0f, _tmpWeights[i]);
 
                     if (wi <= 1e-8f)
                         continue;
 
                     if (positive)
                     {
-                        float cap = hMax - yawApplied[i];
+                        float cap = hMax - _tmpYawApplied[i];
                         if (cap <= eps)
                             continue;
 
                         float add = rem * (wi / freeW);
                         add = Mathf.Min(add, cap);
-                        yawApplied[i] += add;
+                        _tmpYawApplied[i] += add;
                     }
                     else
                     {
-                        float cap = (-hMax) - yawApplied[i]; // negative number
+                        float cap = (-hMax) - _tmpYawApplied[i];
                         if (cap >= -eps)
                             continue;
 
-                        float add = rem * (wi / freeW); // rem negative
+                        float add = rem * (wi / freeW);
                         add = Mathf.Max(add, cap);
-                        yawApplied[i] += add;
+                        _tmpYawApplied[i] += add;
                     }
                 }
             }
         }
 
-        private void RedistributePitch(ref float[] pitchApplied, float pitchTarget, float[] weights)
+        private void RedistributePitch(float pitchTarget)
         {
             const int iters = 8;
             const float eps = 1e-4f;
 
-            int n = pitchApplied.Length;
+            int n = _tmpPitchApplied.Length;
 
             for (int iter = 0; iter < iters; iter++)
             {
                 float sum = 0f;
-                for (int i = 0; i < n; i++) sum += pitchApplied[i];
+                for (int i = 0; i < n; i++) sum += _tmpPitchApplied[i];
 
                 float rem = pitchTarget - sum;
                 if (Mathf.Abs(rem) <= eps)
@@ -472,13 +577,13 @@ namespace AlSo
 
                     if (positive)
                     {
-                        if (pitchApplied[i] < vMax - eps)
-                            freeW += Mathf.Max(0f, weights[i]);
+                        if (_tmpPitchApplied[i] < vMax - eps)
+                            freeW += Mathf.Max(0f, _tmpWeights[i]);
                     }
                     else
                     {
-                        if (pitchApplied[i] > vMin + eps)
-                            freeW += Mathf.Max(0f, weights[i]);
+                        if (_tmpPitchApplied[i] > vMin + eps)
+                            freeW += Mathf.Max(0f, _tmpWeights[i]);
                     }
                 }
 
@@ -493,29 +598,29 @@ namespace AlSo
                     float vMin = Mathf.Min(v.x, v.y);
                     float vMax = Mathf.Max(v.x, v.y);
 
-                    float wi = Mathf.Max(0f, weights[i]);
+                    float wi = Mathf.Max(0f, _tmpWeights[i]);
                     if (wi <= 1e-8f)
                         continue;
 
                     if (positive)
                     {
-                        float cap = vMax - pitchApplied[i];
+                        float cap = vMax - _tmpPitchApplied[i];
                         if (cap <= eps)
                             continue;
 
                         float add = rem * (wi / freeW);
                         add = Mathf.Min(add, cap);
-                        pitchApplied[i] += add;
+                        _tmpPitchApplied[i] += add;
                     }
                     else
                     {
-                        float cap = vMin - pitchApplied[i]; // rem negative => cap negative/zero
+                        float cap = vMin - _tmpPitchApplied[i];
                         if (cap >= -eps)
                             continue;
 
                         float add = rem * (wi / freeW);
                         add = Mathf.Max(add, cap);
-                        pitchApplied[i] += add;
+                        _tmpPitchApplied[i] += add;
                     }
                 }
             }
