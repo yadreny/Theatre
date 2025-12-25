@@ -47,8 +47,6 @@ namespace AlSo
         public bool SetSpeedZero;
     }
 
-    // ====================== STATE TRACK MIXER (exclusive by max weight) ======================
-
     public class LocomotionStateMixerBehaviour : PlayableBehaviour
     {
         public PlayableDirector Director;
@@ -64,7 +62,6 @@ namespace AlSo
         private bool _hasPrevTime;
         private double _prevTrackTime;
 
-        // === Плавный разгон/торможение (константы) ===
         private const float AccelNorm = 0.15f;
         private const float DecelNorm = 0.15f;
 
@@ -83,7 +80,7 @@ namespace AlSo
 
             _locomotionTest.EnsureLocomotionCreated();
 
-            var tr = _targetTransform;
+            Transform tr = _targetTransform;
             if (!_cached)
             {
                 _cached = true;
@@ -91,7 +88,7 @@ namespace AlSo
                 _baseRot = tr.rotation;
             }
 
-            var loco = _locomotionTest.Locomotion;
+            LocomotionSystem loco = _locomotionTest.Locomotion;
             if (loco == null)
             {
                 return;
@@ -100,7 +97,6 @@ namespace AlSo
             const float eps = 1e-6f;
             double trackTime = playable.GetTime();
 
-            // 1) Берём активный input по МАКС. весу (стабильнее с easing/blending).
             bool hasActive = false;
             float activeW = 0f;
             Type activeType = null;
@@ -170,9 +166,12 @@ namespace AlSo
 
             _locomotionTest.SetTimelineDriven(hasActive);
 
-            // 2) Нет активного клипа — idle (и в edit mode откатываемся в base на time=0).
+            float dt = Application.isPlaying ? info.deltaTime : 0f;
+
             if (!hasActive)
             {
+                _locomotionTest.ClearTimelineWorldVelocity();
+
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
@@ -195,17 +194,19 @@ namespace AlSo
                 return;
             }
 
-            // 3) RunTo (детерминированно от времени клипа)
+            // ===================== RunTo =====================
             if (activeType == typeof(LocomotionRunToBehaviour))
             {
                 if (runB == null)
                 {
+                    _locomotionTest.ClearTimelineWorldVelocity();
                     return;
                 }
 
                 RunToRefs refs = ResolveRunToRefs(playable, runB);
                 if (refs.To == null)
                 {
+                    _locomotionTest.ClearTimelineWorldVelocity();
                     return;
                 }
 
@@ -226,7 +227,6 @@ namespace AlSo
                 Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
                 Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
 
-                // Вес клипа учитываем как fade к base
                 if (runB.DrivePosition)
                 {
                     tr.position = Vector3.Lerp(_basePos, p, activeW);
@@ -236,16 +236,19 @@ namespace AlSo
                 {
                     tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
                 }
+                else
+                {
+                    _locomotionTest.ApplyTimelineOrientation(_baseRot, dt);
+                }
 
-                // Скорость для выбора клипов (численная производная по времени клипа, с тем же easing)
-                Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, (float)dur, (float)t, runB);
+                Vector3 vWorldPlanar = ComputeWorldVelocityPlanar(fromPos, toPos, (float)dur, (float)t, runB);
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
                     if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
                     {
-                        finalSpeed = Vector2.zero;
+                        vWorldPlanar = Vector3.zero;
                     }
 
                     _prevTrackTime = trackTime;
@@ -253,12 +256,8 @@ namespace AlSo
                 }
 #endif
 
-                // вес клипа тоже гасит скорость
-                finalSpeed *= activeW;
+                _locomotionTest.SetTimelineWorldVelocity(vWorldPlanar, activeW);
 
-                loco.ClearActionPreview();
-
-                // Фаза локомоции по пройденной дистанции (с easing)
                 Vector3 planarDelta = toPos - fromPos;
                 planarDelta.y = 0f;
 
@@ -271,22 +270,29 @@ namespace AlSo
                 double locomotionTime = (distTraveled / fullSpeed) * speedMul;
                 loco.SetAbsoluteTime(locomotionTime);
 
-                _locomotionTest.debugSpeed = finalSpeed;
-                loco.UpdateLocomotion(finalSpeed, info.deltaTime);
+                Vector2 localSpeed = _locomotionTest.GetTimelineLocalSpeedForGraph();
+                _locomotionTest.debugSpeed = localSpeed;
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
                     loco.ClearActionPreview();
+                    loco.UpdateLocomotion(localSpeed, 0f);
                     loco.EvaluateGraph(0f);
+                    return;
                 }
 #endif
+
+                loco.ClearActionPreview();
+                loco.UpdateLocomotion(localSpeed, info.deltaTime);
                 return;
             }
 
-            // 4) StandAt (Target НЕ обязателен!)
+            // ===================== StandAt =====================
             if (activeType == typeof(LocomotionStandAtBehaviour))
             {
+                _locomotionTest.SetTimelineWorldVelocity(Vector3.zero, 0f);
+
                 if (standB != null && standB.Target != null)
                 {
                     if (standB.DrivePosition)
@@ -297,6 +303,17 @@ namespace AlSo
                     if (standB.DriveRotation)
                     {
                         tr.rotation = Quaternion.Slerp(_baseRot, standB.Target.rotation, activeW);
+                    }
+                    else
+                    {
+                        _locomotionTest.ApplyTimelineOrientation(_baseRot, dt);
+                    }
+                }
+                else
+                {
+                    if (standB == null || !standB.DriveRotation)
+                    {
+                        _locomotionTest.ApplyTimelineOrientation(_baseRot, dt);
                     }
                 }
 
@@ -326,14 +343,19 @@ namespace AlSo
                 return;
             }
 
-            // 5) Action
+            // ===================== Action =====================
             if (actionB == null || actionB.Action == null || actionB.Action.Clip == null)
             {
+                _locomotionTest.ClearTimelineWorldVelocity();
                 return;
             }
 
+            // во время action тоже можно держать “смотрим на цель”
+            _locomotionTest.ApplyTimelineOrientation(_baseRot, dt);
+
             if (actionB.SetSpeedZero)
             {
+                _locomotionTest.SetTimelineWorldVelocity(Vector3.zero, 0f);
                 _locomotionTest.debugSpeed = Vector2.zero;
                 loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
@@ -396,7 +418,6 @@ namespace AlSo
                 d *= k;
             }
 
-            float plateauStart = a;
             float plateauEnd = 1f - d;
 
             float totalArea = 1f - 0.5f * (a + d);
@@ -407,7 +428,7 @@ namespace AlSo
 
             float area;
 
-            if (t01 <= plateauStart)
+            if (t01 <= a)
             {
                 if (a <= 1e-6f) return 0f;
                 area = 0.5f * (t01 * t01) / a;
@@ -423,17 +444,49 @@ namespace AlSo
 
                 float areaToPlateauEnd = 0.5f * a + (plateauEnd - a);
                 float areaDecel = u - 0.5f * (u * u) / d;
-
                 area = areaToPlateauEnd + areaDecel;
             }
 
             return Mathf.Clamp01(area / totalArea);
         }
 
+        private static Vector3 ComputeWorldVelocityPlanar(
+            Vector3 fromPos,
+            Vector3 toPos,
+            float clipDuration,
+            float clipTime,
+            LocomotionRunToBehaviour b)
+        {
+            const float eps = 1e-6f;
+
+            if (clipDuration <= eps)
+            {
+                return Vector3.zero;
+            }
+
+            float h = Mathf.Clamp(clipDuration * 0.01f, 0.001f, 0.05f);
+
+            float t0 = Mathf.Clamp(clipTime - h, 0f, clipDuration);
+            float t1 = Mathf.Clamp(clipTime + h, 0f, clipDuration);
+
+            float ntTime0 = t0 / clipDuration;
+            float ntTime1 = t1 / clipDuration;
+
+            float nt0 = EvaluateMotionNt(b, ntTime0);
+            float nt1 = EvaluateMotionNt(b, ntTime1);
+
+            Vector3 p0 = Vector3.LerpUnclamped(fromPos, toPos, nt0);
+            Vector3 p1 = Vector3.LerpUnclamped(fromPos, toPos, nt1);
+
+            float dt = Mathf.Max(eps, (t1 - t0));
+            Vector3 v = (p1 - p0) / dt;
+            v.y = 0f;
+            return v;
+        }
+
         private RunToRefs ResolveRunToRefs(Playable playable, LocomotionRunToBehaviour b)
         {
             RunToRefs r = default;
-
             r.From = b.FromFallback;
             r.To = b.ToFallback;
 
@@ -456,13 +509,9 @@ namespace AlSo
             {
                 bool valid;
                 UnityEngine.Object obj = table.GetReferenceValue(fromKey, out valid);
-                if (valid)
+                if (valid && obj is Transform tr)
                 {
-                    var tr = obj as Transform;
-                    if (tr != null)
-                    {
-                        r.From = tr;
-                    }
+                    r.From = tr;
                 }
             }
 
@@ -470,63 +519,13 @@ namespace AlSo
             {
                 bool valid;
                 UnityEngine.Object obj = table.GetReferenceValue(toKey, out valid);
-                if (valid)
+                if (valid && obj is Transform tr)
                 {
-                    var tr = obj as Transform;
-                    if (tr != null)
-                    {
-                        r.To = tr;
-                    }
+                    r.To = tr;
                 }
             }
 
             return r;
-        }
-
-        private static Vector2 ComputeSpeedVector2(
-            Transform character,
-            Vector3 fromPos,
-            Vector3 toPos,
-            float clipDuration,
-            float clipTime,
-            LocomotionRunToBehaviour b)
-        {
-            const float eps = 1e-6f;
-
-            if (clipDuration <= eps)
-            {
-                return Vector2.zero;
-            }
-
-            float h = Mathf.Clamp(clipDuration * 0.01f, 0.001f, 0.05f);
-
-            float t0 = Mathf.Clamp(clipTime - h, 0f, clipDuration);
-            float t1 = Mathf.Clamp(clipTime + h, 0f, clipDuration);
-
-            float ntTime0 = t0 / clipDuration;
-            float ntTime1 = t1 / clipDuration;
-
-            float nt0 = EvaluateMotionNt(b, ntTime0);
-            float nt1 = EvaluateMotionNt(b, ntTime1);
-
-            Vector3 p0 = Vector3.LerpUnclamped(fromPos, toPos, nt0);
-            Vector3 p1 = Vector3.LerpUnclamped(fromPos, toPos, nt1);
-
-            float dt = Mathf.Max(eps, (t1 - t0));
-            Vector3 vWorld = (p1 - p0) / dt;
-
-            Vector3 vLocal3 = character.InverseTransformDirection(vWorld);
-            Vector2 vLocal = new Vector2(vLocal3.x, vLocal3.z);
-
-            float worldPlanarSpeed = new Vector2(vWorld.x, vWorld.z).magnitude;
-            float mag01 = Mathf.Clamp01(worldPlanarSpeed / Mathf.Max(0.0001f, b.FullSpeedMps));
-
-            if (vLocal.sqrMagnitude <= 1e-10f)
-            {
-                return Vector2.zero;
-            }
-
-            return vLocal.normalized * (mag01 * b.SpeedMultiplier);
         }
 
         private bool TryResolveTarget()

@@ -3,9 +3,9 @@ using UnityEngine;
 
 namespace AlSo
 {
-//#if UNITY_EDITOR
-//    [ExecuteAlways]
-//#endif
+#if UNITY_EDITOR
+    [ExecuteAlways]
+#endif
     [RequireComponent(typeof(Animator))]
     public class LocomotionProfileTest : SerializedMonoBehaviour
     {
@@ -43,8 +43,13 @@ namespace AlSo
         public float speedAngleDeg = 0f;
 
         [ReadOnly]
-        [LabelText("Debug Speed (X,Z)")]
+        [LabelText("Debug Speed (local X,Z)")]
         public Vector2 debugSpeed;
+
+        [Header("Orientation")]
+        [Tooltip("За сколько секунд в среднем доворачиваемся к desired-ориентации (меньше = резче).")]
+        [Min(0f)]
+        public float orientationBlendSeconds = 0.15f;
 
         [Header("Gizmo")]
         [Tooltip("Рисовать ли гизмо-направление скорости.")]
@@ -67,26 +72,33 @@ namespace AlSo
         [Tooltip("Клип атаки, который будет запускаться по нажатию Q.")]
         public AnimationClip attackClip;
 
-        [Header("Root Motion")]
-        [Tooltip("Выключать root motion в Edit Mode (чтобы персонаж не 'полз' при скрабе/статичном времени).")]
-        public bool disableRootMotionInEditMode = true;
-
-        [Tooltip("Выключать root motion, когда TimelineDriven=true (потому что Timeline сам детерминированно двигает Transform).")]
-        public bool disableRootMotionWhenTimelineDriven = true;
-
         private Animator _animator;
         private LocomotionSystem _locomotion;
 
-        private bool _defaultRootMotionCaptured;
-        private bool _defaultApplyRootMotion;
-
         public LocomotionSystem Locomotion => _locomotion;
 
-        // ВАЖНО: когда true — управление скоростью/экшенами идёт от Timeline, Update() не вмешивается.
         [ShowInInspector, ReadOnly]
         public bool TimelineDriven { get; private set; }
 
-        // Odin helpers для показа полей
+        // ===== Timeline: ориентация (не одна цель, а вычисленное направление) =====
+
+        [ShowInInspector, ReadOnly]
+        public Transform OrientationDebugTarget { get; private set; }
+
+        [ShowInInspector, ReadOnly]
+        public Vector3 OrientationForwardWorldPlanar { get; private set; }
+
+        [ShowInInspector, ReadOnly]
+        public float OrientationWeight01 { get; private set; }
+
+        // ===== Timeline: absolute (world) planar velocity =====
+
+        [ShowInInspector, ReadOnly]
+        public Vector3 TimelineWorldVelocityPlanar { get; private set; }
+
+        [ShowInInspector, ReadOnly]
+        public float TimelineWorldVelocityWeight01 { get; private set; }
+
         private bool ShowCartesianSpeedFields => !useInput && !usePolarInput;
         private bool ShowPolarSpeedFields => !useInput && usePolarInput;
 
@@ -94,9 +106,6 @@ namespace AlSo
         {
             _locomotion = null;
             _animator = GetComponent<Animator>();
-
-            CaptureDefaultRootMotionIfNeeded();
-            ApplyRootMotionPolicy();
 
             if (profile != null)
             {
@@ -108,67 +117,19 @@ namespace AlSo
             }
         }
 
-        private void CaptureDefaultRootMotionIfNeeded()
-        {
-            if (_animator == null)
-            {
-                return;
-            }
-
-            if (_defaultRootMotionCaptured)
-            {
-                return;
-            }
-
-            _defaultApplyRootMotion = _animator.applyRootMotion;
-            _defaultRootMotionCaptured = true;
-        }
-
-        private void ApplyRootMotionPolicy()
-        {
-            if (_animator == null)
-            {
-                return;
-            }
-
-            CaptureDefaultRootMotionIfNeeded();
-
-            bool desired = _defaultRootMotionCaptured ? _defaultApplyRootMotion : _animator.applyRootMotion;
-
-#if UNITY_EDITOR
-            if (!Application.isPlaying && disableRootMotionInEditMode)
-            {
-                desired = false;
-            }
-#endif
-
-            if (TimelineDriven && disableRootMotionWhenTimelineDriven)
-            {
-                desired = false;
-            }
-
-            if (_animator.applyRootMotion != desired)
-            {
-                _animator.applyRootMotion = desired;
-            }
-        }
-
         private void Update()
         {
             if (_locomotion == null)
                 return;
 
-            // Ключевой фикс: если Timeline сейчас ведёт — не затираем его работу.
             if (TimelineDriven)
                 return;
 
 #if UNITY_EDITOR
-            // В Edit Mode без Timeline управления — тоже не гоняем Input.
             if (!Application.isPlaying)
                 return;
 #endif
 
-            // --------- выбираем источник скорости ---------
             Vector2 speed;
 
             if (useInput)
@@ -209,7 +170,6 @@ namespace AlSo
             {
                 if (attackClip != null)
                 {
-                    // Вручную — как раньше
                     _locomotion.PerformClip(attackClip, 0.1f, 0.1f);
                     UnityEngine.Debug.Log("[LocomotionProfileTest] Q pressed: PerformClip(attackClip).");
 
@@ -225,30 +185,10 @@ namespace AlSo
 
         private void OnDestroy()
         {
-            RestoreDefaultRootMotion();
-
             if (_locomotion != null)
             {
                 _locomotion.Destroy();
                 _locomotion = null;
-            }
-        }
-
-        private void RestoreDefaultRootMotion()
-        {
-            if (_animator == null)
-            {
-                return;
-            }
-
-            if (!_defaultRootMotionCaptured)
-            {
-                return;
-            }
-
-            if (_animator.applyRootMotion != _defaultApplyRootMotion)
-            {
-                _animator.applyRootMotion = _defaultApplyRootMotion;
             }
         }
 
@@ -293,7 +233,90 @@ namespace AlSo
         public void SetTimelineDriven(bool driven)
         {
             TimelineDriven = driven;
-            ApplyRootMotionPolicy();
+        }
+
+        // Ориентация: трек вычисляет планарный forward (мировой) и weight.
+        public void SetOrientationForward(Vector3 forwardWorldPlanar, float weight01, Transform debugTarget)
+        {
+            forwardWorldPlanar.y = 0f;
+
+            OrientationDebugTarget = debugTarget;
+
+            if (forwardWorldPlanar.sqrMagnitude > 1e-8f)
+            {
+                OrientationForwardWorldPlanar = forwardWorldPlanar.normalized;
+            }
+            else
+            {
+                OrientationForwardWorldPlanar = Vector3.zero;
+            }
+
+            OrientationWeight01 = Mathf.Clamp01(weight01);
+        }
+
+        public void ClearOrientation()
+        {
+            OrientationDebugTarget = null;
+            OrientationForwardWorldPlanar = Vector3.zero;
+            OrientationWeight01 = 0f;
+        }
+
+        // world velocity: миксер RunTo/StandAt задаёт абсолютную планарную скорость
+        public void SetTimelineWorldVelocity(Vector3 worldVelocityPlanar, float weight01)
+        {
+            worldVelocityPlanar.y = 0f;
+            TimelineWorldVelocityPlanar = worldVelocityPlanar;
+            TimelineWorldVelocityWeight01 = Mathf.Clamp01(weight01);
+        }
+
+        public void ClearTimelineWorldVelocity()
+        {
+            TimelineWorldVelocityPlanar = Vector3.zero;
+            TimelineWorldVelocityWeight01 = 0f;
+        }
+
+        // перевод world planar velocity -> local XZ для графа (LocomotionSystem)
+        public Vector2 GetTimelineLocalSpeedForGraph()
+        {
+            Vector3 vWorld = TimelineWorldVelocityPlanar * Mathf.Clamp01(TimelineWorldVelocityWeight01);
+            Vector3 vLocal3 = transform.InverseTransformDirection(vWorld);
+            return new Vector2(vLocal3.x, vLocal3.z);
+        }
+
+        // Применяем ориентацию (если есть), с плавным поворотом в PlayMode.
+        // В Edit Mode / Scrub — dtSeconds обычно 0, тогда делаем детерминированный “бленд” от baseRotation.
+        public bool ApplyTimelineOrientation(Quaternion baseRotation, float dtSeconds)
+        {
+            const float eps = 1e-6f;
+
+            float w = OrientationWeight01;
+            if (w <= eps)
+            {
+                return false;
+            }
+
+            Vector3 fwd = OrientationForwardWorldPlanar;
+            if (fwd.sqrMagnitude <= 1e-8f)
+            {
+                return false;
+            }
+
+            Quaternion desired = Quaternion.LookRotation(fwd.normalized, Vector3.up);
+
+            // EditMode/Scrub: dt=0 -> не накапливаем, а просто “задаём позу” через вес.
+            if (dtSeconds <= 0f)
+            {
+                transform.rotation = Quaternion.Slerp(baseRotation, desired, w);
+                return true;
+            }
+
+            // PlayMode: плавное приближение к desired + сила от weight.
+            float blend = Mathf.Max(0.0001f, orientationBlendSeconds);
+            float alpha = 1f - Mathf.Exp(-dtSeconds / blend);
+            float k = Mathf.Clamp01(alpha * w);
+
+            transform.rotation = Quaternion.Slerp(transform.rotation, desired, k);
+            return true;
         }
 
         public void PerformAction(AnimationActionClipData actionData)
@@ -312,11 +335,9 @@ namespace AlSo
                 return;
             }
 
-            // стопаем скорость (чтобы не “дотаптывал”)
             debugSpeed = Vector2.zero;
             _locomotion.UpdateLocomotion(Vector2.zero);
 
-            // fade по процентам
             float len = actionData.Clip.length;
             float fadeIn = Mathf.Clamp01(actionData.FadeInPercent) * len;
             float fadeOut = Mathf.Clamp01(actionData.FadeOutPercent) * len;
@@ -324,17 +345,9 @@ namespace AlSo
             _locomotion.PerformClip(actionData.Clip, fadeIn, fadeOut);
         }
 
-        // ==== Ensure for Edit Mode / Timeline ====
-
         private void OnEnable()
         {
             EnsureLocomotionCreated();
-            if (_animator == null)
-            {
-                _animator = GetComponent<Animator>();
-            }
-            CaptureDefaultRootMotionIfNeeded();
-            ApplyRootMotionPolicy();
         }
 
         private void OnDisable()

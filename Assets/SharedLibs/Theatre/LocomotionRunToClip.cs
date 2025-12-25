@@ -32,11 +32,8 @@ namespace AlSo
             var playable = ScriptPlayable<LocomotionRunToBehaviour>.Create(graph);
             var b = playable.GetBehaviour();
 
-            // ВАЖНО: Unity может менять exposedName при редактировании ссылок,
-            // поэтому мы храним ссылку на Asset и читаем exposedName в миксере каждый кадр.
             b.Asset = this;
 
-            // Фолбэк на момент сборки графа.
             var r = graph.GetResolver();
             b.FromFallback = from.Resolve(r);
             b.ToFallback = to.Resolve(r);
@@ -87,9 +84,8 @@ namespace AlSo
         private float _cachedAnimatorSpeed = 1f;
 #endif
 
-        // === Плавный разгон/торможение (константы) ===
-        private const float AccelNorm = 0.15f; // 15% клипа на разгон
-        private const float DecelNorm = 0.15f; // 15% клипа на затухание
+        private const float AccelNorm = 0.15f;
+        private const float DecelNorm = 0.15f;
 
         private struct RunToRefs
         {
@@ -110,7 +106,7 @@ namespace AlSo
 
             _locomotionTest.EnsureLocomotionCreated();
 
-            var tr = _targetTransform;
+            Transform tr = _targetTransform;
             if (!_cached)
             {
                 _cached = true;
@@ -118,7 +114,7 @@ namespace AlSo
                 _baseRot = tr.rotation;
             }
 
-            var loco = _locomotionTest.Locomotion;
+            LocomotionSystem loco = _locomotionTest.Locomotion;
             if (loco == null)
             {
                 return;
@@ -127,7 +123,6 @@ namespace AlSo
             const float eps = 1e-6f;
             double trackTime = playable.GetTime();
 
-            // Ищем один активный input (max weight)
             bool hasActive = false;
             float activeW = 0f;
 
@@ -161,14 +156,10 @@ namespace AlSo
 
             _locomotionTest.SetTimelineDriven(hasActive);
 
-            RunToRefs refs = default;
-            if (hasActive && b != null)
+            if (!hasActive || b == null)
             {
-                refs = ResolveRunToRefs(playable, b);
-            }
+                _locomotionTest.ClearTimelineWorldVelocity();
 
-            if (!hasActive || b == null || refs.To == null)
-            {
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
@@ -188,6 +179,13 @@ namespace AlSo
                 loco.SetAbsoluteTime(trackTime);
                 _locomotionTest.debugSpeed = Vector2.zero;
                 loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
+                return;
+            }
+
+            RunToRefs refs = ResolveRunToRefs(playable, b);
+            if (refs.To == null)
+            {
+                _locomotionTest.ClearTimelineWorldVelocity();
                 return;
             }
 
@@ -217,15 +215,15 @@ namespace AlSo
             {
                 tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
             }
+            else
+            {
+                float dt = Application.isPlaying ? info.deltaTime : 0f;
+                _locomotionTest.ApplyTimelineOrientation(_baseRot, dt);
+            }
 
-            Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, (float)dur, (float)t, b);
+            Vector3 vWorldPlanar = ComputeWorldVelocityPlanar(fromPos, toPos, (float)dur, (float)t, b);
+            _locomotionTest.SetTimelineWorldVelocity(vWorldPlanar, activeW);
 
-            // Вес клипа тоже должен гасить скорость на входе/выходе.
-            finalSpeed *= activeW;
-
-            loco.ClearActionPreview();
-
-            // Фаза локомоции привязана к пройденной дистанции (теперь с easing).
             Vector3 planarDelta = toPos - fromPos;
             planarDelta.y = 0f;
 
@@ -238,28 +236,29 @@ namespace AlSo
             double locomotionTime = (distTraveled / fullSpeed) * speedMul;
             loco.SetAbsoluteTime(locomotionTime);
 
-            _locomotionTest.debugSpeed = finalSpeed;
+            Vector2 localSpeed = _locomotionTest.GetTimelineLocalSpeedForGraph();
+            _locomotionTest.debugSpeed = localSpeed;
 
 #if UNITY_EDITOR
             if (!Application.isPlaying)
             {
-                loco.UpdateLocomotion(finalSpeed, 0f);
+                loco.ClearActionPreview();
+                loco.UpdateLocomotion(localSpeed, 0f);
                 loco.EvaluateGraph(0f);
                 return;
             }
 #endif
 
-            loco.UpdateLocomotion(finalSpeed, info.deltaTime);
+            loco.ClearActionPreview();
+            loco.UpdateLocomotion(localSpeed, info.deltaTime);
         }
 
         private static float EvaluateMotionNt(LocomotionRunToBehaviour b, float ntTime01)
         {
             ntTime01 = Mathf.Clamp01(ntTime01);
 
-            // 1) time easing (разгон/торможение)
             float nt = ApplyAccelDecelProgress(ntTime01);
 
-            // 2) пользовательская кривая (опционально)
             if (b.Curve != null && b.Curve.length > 0)
             {
                 nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
@@ -275,7 +274,6 @@ namespace AlSo
             float a = Mathf.Clamp01(AccelNorm);
             float d = Mathf.Clamp01(DecelNorm);
 
-            // если кто-то поставит очень большие значения — защитимся
             if (a + d >= 0.999f)
             {
                 float k = 0.999f / Mathf.Max(1e-6f, (a + d));
@@ -283,10 +281,8 @@ namespace AlSo
                 d *= k;
             }
 
-            float plateauStart = a;
             float plateauEnd = 1f - d;
 
-            // Площадь под профилем скорости (трапеция с линейными рампами)
             float totalArea = 1f - 0.5f * (a + d);
             if (totalArea <= 1e-6f)
             {
@@ -295,37 +291,65 @@ namespace AlSo
 
             float area;
 
-            if (t01 <= plateauStart)
+            if (t01 <= a)
             {
-                // v = t/a
                 if (a <= 1e-6f) return 0f;
                 area = 0.5f * (t01 * t01) / a;
             }
             else if (t01 <= plateauEnd)
             {
-                // area до конца разгона + плато
                 area = 0.5f * a + (t01 - a);
             }
             else
             {
-                // разгон + плато + кусок торможения
-                float u = t01 - plateauEnd; // 0..d
+                float u = t01 - plateauEnd;
                 if (d <= 1e-6f) return 1f;
 
                 float areaToPlateauEnd = 0.5f * a + (plateauEnd - a);
-                // v = 1 - u/d
                 float areaDecel = u - 0.5f * (u * u) / d;
-
                 area = areaToPlateauEnd + areaDecel;
             }
 
             return Mathf.Clamp01(area / totalArea);
         }
 
+        private static Vector3 ComputeWorldVelocityPlanar(
+            Vector3 fromPos,
+            Vector3 toPos,
+            float clipDuration,
+            float clipTime,
+            LocomotionRunToBehaviour b)
+        {
+            const float eps = 1e-6f;
+
+            if (clipDuration <= eps)
+            {
+                return Vector3.zero;
+            }
+
+            float h = Mathf.Clamp(clipDuration * 0.01f, 0.001f, 0.05f);
+
+            float t0 = Mathf.Clamp(clipTime - h, 0f, clipDuration);
+            float t1 = Mathf.Clamp(clipTime + h, 0f, clipDuration);
+
+            float ntTime0 = t0 / clipDuration;
+            float ntTime1 = t1 / clipDuration;
+
+            float nt0 = EvaluateMotionNt(b, ntTime0);
+            float nt1 = EvaluateMotionNt(b, ntTime1);
+
+            Vector3 p0 = Vector3.LerpUnclamped(fromPos, toPos, nt0);
+            Vector3 p1 = Vector3.LerpUnclamped(fromPos, toPos, nt1);
+
+            float dt = Mathf.Max(eps, (t1 - t0));
+            Vector3 v = (p1 - p0) / dt;
+            v.y = 0f;
+            return v;
+        }
+
         private RunToRefs ResolveRunToRefs(Playable playable, LocomotionRunToBehaviour b)
         {
             RunToRefs r = default;
-
             r.From = b.FromFallback;
             r.To = b.ToFallback;
 
@@ -348,13 +372,9 @@ namespace AlSo
             {
                 bool valid;
                 UnityEngine.Object obj = table.GetReferenceValue(fromKey, out valid);
-                if (valid)
+                if (valid && obj is Transform tr)
                 {
-                    var tr = obj as Transform;
-                    if (tr != null)
-                    {
-                        r.From = tr;
-                    }
+                    r.From = tr;
                 }
             }
 
@@ -362,63 +382,13 @@ namespace AlSo
             {
                 bool valid;
                 UnityEngine.Object obj = table.GetReferenceValue(toKey, out valid);
-                if (valid)
+                if (valid && obj is Transform tr)
                 {
-                    var tr = obj as Transform;
-                    if (tr != null)
-                    {
-                        r.To = tr;
-                    }
+                    r.To = tr;
                 }
             }
 
             return r;
-        }
-
-        private static Vector2 ComputeSpeedVector2(
-            Transform character,
-            Vector3 fromPos,
-            Vector3 toPos,
-            float clipDuration,
-            float clipTime,
-            LocomotionRunToBehaviour b)
-        {
-            const float eps = 1e-6f;
-
-            if (clipDuration <= eps)
-            {
-                return Vector2.zero;
-            }
-
-            float h = Mathf.Clamp(clipDuration * 0.01f, 0.001f, 0.05f);
-
-            float t0 = Mathf.Clamp(clipTime - h, 0f, clipDuration);
-            float t1 = Mathf.Clamp(clipTime + h, 0f, clipDuration);
-
-            float ntTime0 = t0 / clipDuration;
-            float ntTime1 = t1 / clipDuration;
-
-            float nt0 = EvaluateMotionNt(b, ntTime0);
-            float nt1 = EvaluateMotionNt(b, ntTime1);
-
-            Vector3 p0 = Vector3.LerpUnclamped(fromPos, toPos, nt0);
-            Vector3 p1 = Vector3.LerpUnclamped(fromPos, toPos, nt1);
-
-            float dt = Mathf.Max(eps, (t1 - t0));
-            Vector3 vWorld = (p1 - p0) / dt;
-
-            Vector3 vLocal3 = character.InverseTransformDirection(vWorld);
-            Vector2 vLocal = new Vector2(vLocal3.x, vLocal3.z);
-
-            float worldPlanarSpeed = new Vector2(vWorld.x, vWorld.z).magnitude;
-            float mag01 = Mathf.Clamp01(worldPlanarSpeed / Mathf.Max(0.0001f, b.FullSpeedMps));
-
-            if (vLocal.sqrMagnitude <= 1e-10f)
-            {
-                return Vector2.zero;
-            }
-
-            return vLocal.normalized * (mag01 * b.SpeedMultiplier);
         }
 
         private bool TryResolveTarget()
