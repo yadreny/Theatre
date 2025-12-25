@@ -3,9 +3,9 @@ using UnityEngine;
 
 namespace AlSo
 {
-#if UNITY_EDITOR
-    [ExecuteAlways]
-#endif
+//#if UNITY_EDITOR
+//    [ExecuteAlways]
+//#endif
     [RequireComponent(typeof(Animator))]
     public class LocomotionProfileTest : SerializedMonoBehaviour
     {
@@ -67,8 +67,18 @@ namespace AlSo
         [Tooltip("Клип атаки, который будет запускаться по нажатию Q.")]
         public AnimationClip attackClip;
 
+        [Header("Root Motion")]
+        [Tooltip("Выключать root motion в Edit Mode (чтобы персонаж не 'полз' при скрабе/статичном времени).")]
+        public bool disableRootMotionInEditMode = true;
+
+        [Tooltip("Выключать root motion, когда TimelineDriven=true (потому что Timeline сам детерминированно двигает Transform).")]
+        public bool disableRootMotionWhenTimelineDriven = true;
+
         private Animator _animator;
         private LocomotionSystem _locomotion;
+
+        private bool _defaultRootMotionCaptured;
+        private bool _defaultApplyRootMotion;
 
         public LocomotionSystem Locomotion => _locomotion;
 
@@ -85,6 +95,9 @@ namespace AlSo
             _locomotion = null;
             _animator = GetComponent<Animator>();
 
+            CaptureDefaultRootMotionIfNeeded();
+            ApplyRootMotionPolicy();
+
             if (profile != null)
             {
                 _locomotion = profile.CreateLocomotion(_animator);
@@ -92,6 +105,51 @@ namespace AlSo
             else
             {
                 UnityEngine.Debug.LogError("[LocomotionProfileTest] Profile is not assigned.");
+            }
+        }
+
+        private void CaptureDefaultRootMotionIfNeeded()
+        {
+            if (_animator == null)
+            {
+                return;
+            }
+
+            if (_defaultRootMotionCaptured)
+            {
+                return;
+            }
+
+            _defaultApplyRootMotion = _animator.applyRootMotion;
+            _defaultRootMotionCaptured = true;
+        }
+
+        private void ApplyRootMotionPolicy()
+        {
+            if (_animator == null)
+            {
+                return;
+            }
+
+            CaptureDefaultRootMotionIfNeeded();
+
+            bool desired = _defaultRootMotionCaptured ? _defaultApplyRootMotion : _animator.applyRootMotion;
+
+#if UNITY_EDITOR
+            if (!Application.isPlaying && disableRootMotionInEditMode)
+            {
+                desired = false;
+            }
+#endif
+
+            if (TimelineDriven && disableRootMotionWhenTimelineDriven)
+            {
+                desired = false;
+            }
+
+            if (_animator.applyRootMotion != desired)
+            {
+                _animator.applyRootMotion = desired;
             }
         }
 
@@ -167,10 +225,30 @@ namespace AlSo
 
         private void OnDestroy()
         {
+            RestoreDefaultRootMotion();
+
             if (_locomotion != null)
             {
                 _locomotion.Destroy();
                 _locomotion = null;
+            }
+        }
+
+        private void RestoreDefaultRootMotion()
+        {
+            if (_animator == null)
+            {
+                return;
+            }
+
+            if (!_defaultRootMotionCaptured)
+            {
+                return;
+            }
+
+            if (_animator.applyRootMotion != _defaultApplyRootMotion)
+            {
+                _animator.applyRootMotion = _defaultApplyRootMotion;
             }
         }
 
@@ -215,6 +293,7 @@ namespace AlSo
         public void SetTimelineDriven(bool driven)
         {
             TimelineDriven = driven;
+            ApplyRootMotionPolicy();
         }
 
         public void PerformAction(AnimationActionClipData actionData)
@@ -250,6 +329,12 @@ namespace AlSo
         private void OnEnable()
         {
             EnsureLocomotionCreated();
+            if (_animator == null)
+            {
+                _animator = GetComponent<Animator>();
+            }
+            CaptureDefaultRootMotionIfNeeded();
+            ApplyRootMotionPolicy();
         }
 
         private void OnDisable()

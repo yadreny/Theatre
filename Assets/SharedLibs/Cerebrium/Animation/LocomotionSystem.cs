@@ -24,6 +24,8 @@ namespace AlSo
         private readonly FreedomWeightCalculator _weightCalculator;
         private readonly bool _useCycleOffsetPhase;
 
+        private readonly bool _manualUpdateMode;
+
         private PlayableGraph _graph;
 
         private AnimationMixerPlayable _locomotionMixer;
@@ -65,6 +67,9 @@ namespace AlSo
 
             _useCycleOffsetPhase = false;
 
+            // В Edit Mode граф должен быть MANUAL, иначе он "живет сам по себе" и ноги перебирают даже при статичном времени.
+            _manualUpdateMode = !Application.isPlaying;
+
             _weightCalculator = new FreedomWeightCalculator(_profile);
             InitializeGraph();
         }
@@ -80,7 +85,7 @@ namespace AlSo
             }
 
             _graph = PlayableGraph.Create("LocomotionGraph");
-            _graph.SetTimeUpdateMode(DirectorUpdateMode.GameTime);
+            _graph.SetTimeUpdateMode(_manualUpdateMode ? DirectorUpdateMode.Manual : DirectorUpdateMode.GameTime);
 
             _locomotionMixer = AnimationMixerPlayable.Create(_graph, count, true);
             _clipPlayables = new AnimationClipPlayable[count];
@@ -136,7 +141,11 @@ namespace AlSo
             var output = AnimationPlayableOutput.Create(_graph, "LocomotionOutput", _animator);
             output.SetSourcePlayable(_layerMixer);
 
-            _graph.Play();
+            // Важно: в Edit Mode НЕ Play() — иначе граф тикает сам и "перебирает ногами".
+            if (!_manualUpdateMode)
+            {
+                _graph.Play();
+            }
         }
 
         // --- public API ---
@@ -153,6 +162,13 @@ namespace AlSo
         {
             if (!_graph.IsValid())
             {
+                return;
+            }
+
+            // В manual режиме мы двигаем время сами (SetAbsoluteTime), а тут только "применяем" позу.
+            if (_manualUpdateMode)
+            {
+                _graph.Evaluate(0f);
                 return;
             }
 
@@ -366,10 +382,6 @@ namespace AlSo
 
         // --- Actions (Timeline preview / scrubbing) ---
 
-        /// <summary>
-        /// Превью-режим: Timeline сам задаёт время внутри action-клипа и итоговый вес слоя.
-        /// Это даёт корректный скраб в Edit Mode.
-        /// </summary>
         public void PreviewAction(IAnimationActionClip action, float localTimeSeconds, float layerWeight01)
         {
             if (!_graph.IsValid())
@@ -412,10 +424,8 @@ namespace AlSo
 
             _currentActionData = action;
 
-            // В preview ACTION НИКОГДА не тикает сам.
             _actionPlayable.SetSpeed(0.0);
 
-            // runtime-state machine выключаем
             _actionState = ActionState.None;
             _actionTime = 0f;
             _actionDuration = action.Clip.length;

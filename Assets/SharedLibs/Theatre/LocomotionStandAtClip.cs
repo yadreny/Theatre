@@ -90,7 +90,7 @@ namespace AlSo
             const float eps = 1e-6f;
             double trackTime = playable.GetTime();
 
-            // 1) Берём активный input по МАКС. весу (так стабильнее с easing/blending).
+            // 1) Берём активный input по МАКС. весу (стабильнее с easing/blending).
             bool hasActive = false;
             float activeW = 0f;
             Type activeType = null;
@@ -185,7 +185,7 @@ namespace AlSo
                 return;
             }
 
-            // 3) RunTo
+            // 3) RunTo (детерминированно от времени клипа)
             if (activeType == typeof(LocomotionRunToBehaviour))
             {
                 if (runB == null || runB.To == null)
@@ -210,19 +210,22 @@ namespace AlSo
                 Vector3 toPos = runB.To.position;
                 Quaternion toRot = runB.To.rotation;
 
+                Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
+                Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
+
+                // Вес клипа учитываем как fade к base
                 if (runB.DrivePosition)
                 {
-                    Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
                     tr.position = Vector3.Lerp(_basePos, p, activeW);
                 }
 
                 if (runB.DriveRotation)
                 {
-                    Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
                     tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
                 }
 
-                Vector2 vLocal = ComputeSpeedVector2(tr, fromPos, toPos, runP, runB);
+                // Скорость для выбора клипов (тоже детерминированно: численная производная по времени клипа)
+                Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, runP, runB);
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
@@ -230,7 +233,7 @@ namespace AlSo
                     // при скрабе одно и то же время может вызываться несколько раз
                     if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
                     {
-                        vLocal = Vector2.zero;
+                        finalSpeed = Vector2.zero;
                     }
 
                     _prevTrackTime = trackTime;
@@ -239,19 +242,31 @@ namespace AlSo
 #endif
 
                 loco.ClearActionPreview();
-                loco.SetAbsoluteTime(trackTime);
-                _locomotionTest.debugSpeed = vLocal;
+
+                // Синхронизируем фазу локомоции по ПРОЙДЕННОЙ ДИСТАНЦИИ, а не по времени таймлайна.
+                // Это делает PlayMode и Scrub максимально одинаковыми и исключает накопление ошибки при перемотке.
+                Vector3 planarDelta = toPos - fromPos;
+                planarDelta.y = 0f;
+
+                float totalDist = planarDelta.magnitude;
+                float distTraveled = totalDist * nt;
+
+                float fullSpeed = Mathf.Max(0.0001f, runB.FullSpeedMps);
+                float speedMul = Mathf.Max(0.0001f, runB.SpeedMultiplier);
+
+                double locomotionTime = (distTraveled / fullSpeed) * speedMul;
+                loco.SetAbsoluteTime(locomotionTime);
+
+                _locomotionTest.debugSpeed = finalSpeed;
+                loco.UpdateLocomotion(finalSpeed, info.deltaTime);
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
-                    loco.UpdateLocomotion(vLocal, 0f);
+                    loco.ClearActionPreview();
                     loco.EvaluateGraph(0f);
-                    return;
                 }
 #endif
-
-                loco.UpdateLocomotion(vLocal, info.deltaTime);
                 return;
             }
 
@@ -305,10 +320,10 @@ namespace AlSo
                 return;
             }
 
-            // Базовую локомоцию для позы/кривых держим (часто нужно, особенно если action с setSpeedZero)
             if (actionB.SetSpeedZero)
             {
                 _locomotionTest.debugSpeed = Vector2.zero;
+                loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
 
             loco.SetAbsoluteTime(trackTime);
@@ -358,6 +373,7 @@ namespace AlSo
                 return Vector2.zero;
             }
 
+            // малый шаг для численной производной по времени клипа
             float h = Mathf.Clamp(dur * 0.01f, 0.001f, 0.05f);
 
             float t0 = Mathf.Clamp(t - h, 0f, dur);

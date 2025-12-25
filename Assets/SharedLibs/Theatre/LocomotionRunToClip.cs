@@ -15,9 +15,9 @@ namespace AlSo
         public bool drivePosition = true;
         public bool driveRotation = false;
 
-        [Header("Locomotion speed mapping")]
-        [Tooltip("Сколько м/с соответствует скорости 1.0 в Locomotion (для нормализации).")]
-        public float fullSpeedMetersPerSecond = 2.0f;
+        [Header("Speed")]
+        [Tooltip("Номинальная скорость (м/с), при которой speed=1. Эта величина используется для нормализации.")]
+        public float fullSpeedMetersPerSecond = 2.5f;
 
         [Tooltip("Множитель на итоговый speed (после нормализации).")]
         public float speedMultiplier = 1.0f;
@@ -74,8 +74,11 @@ namespace AlSo
         private Vector3 _basePos;
         private Quaternion _baseRot;
 
-        private bool _hasPrevTime;
-        private double _prevTrackTime;
+#if UNITY_EDITOR
+        private Animator _animator;
+        private bool _cachedAnimatorSpeedValid;
+        private float _cachedAnimatorSpeed = 1f;
+#endif
 
         public override void ProcessFrame(Playable playable, FrameData info, object playerData)
         {
@@ -84,10 +87,14 @@ namespace AlSo
                 return;
             }
 
+#if UNITY_EDITOR
+            // В Edit Mode запрещаем "самотёк" анимации: поза меняется только когда меняется время Timeline.
+            SetAnimatorFrozenInEditMode(true);
+#endif
+
             _locomotionTest.EnsureLocomotionCreated();
 
             var tr = _targetTransform;
-
             if (!_cached)
             {
                 _cached = true;
@@ -95,23 +102,23 @@ namespace AlSo
                 _baseRot = tr.rotation;
             }
 
-            int inputCount = playable.GetInputCount();
+            var loco = _locomotionTest.Locomotion;
+            if (loco == null)
+            {
+                return;
+            }
+
             const float eps = 1e-6f;
+            double trackTime = playable.GetTime();
 
-            float sumW = 0f;
+            // Ищем один активный input (max weight)
+            bool hasActive = false;
+            float activeW = 0f;
 
-            Vector3 posAcc = Vector3.zero;
-            bool anyPos = false;
+            ScriptPlayable<LocomotionRunToBehaviour> sp = default;
+            LocomotionRunToBehaviour b = null;
 
-            Quaternion rotAcc = Quaternion.identity;
-            bool anyRot = false;
-            float rotWAcc = 0f;
-
-            Vector2 speedAcc = Vector2.zero;
-            bool anySpeed = false;
-
-            double trackTime = playable.GetTime(); // время Timeline
-
+            int inputCount = playable.GetInputCount();
             for (int i = 0; i < inputCount; i++)
             {
                 float w = playable.GetInputWeight(i);
@@ -121,72 +128,24 @@ namespace AlSo
                 }
 
                 var input = playable.GetInput(i);
-                if (!input.IsValid() || input.GetPlayableType() != typeof(LocomotionRunToBehaviour))
+                if (!input.IsValid())
                 {
                     continue;
                 }
 
-                var sp = (ScriptPlayable<LocomotionRunToBehaviour>)input;
-                var b = sp.GetBehaviour();
-                if (b == null || b.To == null)
+                if (!hasActive || w > activeW)
                 {
-                    continue;
+                    hasActive = true;
+                    activeW = w;
+
+                    sp = (ScriptPlayable<LocomotionRunToBehaviour>)input;
+                    b = sp.GetBehaviour();
                 }
-
-                double dur = sp.GetDuration();
-                double t = sp.GetTime();
-
-                float nt = (dur > eps) ? (float)(t / dur) : 1f;
-                nt = Mathf.Clamp01(nt);
-
-                if (b.Curve != null && b.Curve.length > 0)
-                {
-                    nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
-                }
-
-                Vector3 fromPos = b.From != null ? b.From.position : _basePos;
-                Quaternion fromRot = b.From != null ? b.From.rotation : _baseRot;
-
-                Vector3 toPos = b.To.position;
-                Quaternion toRot = b.To.rotation;
-
-                Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
-                Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
-
-                if (b.DrivePosition)
-                {
-                    posAcc += p * w;
-                    anyPos = true;
-                }
-
-                if (b.DriveRotation)
-                {
-                    float newRotW = rotWAcc + w;
-                    float k = (newRotW > eps) ? (w / newRotW) : 1f;
-
-                    if (!anyRot)
-                    {
-                        rotAcc = r;
-                        anyRot = true;
-                        rotWAcc = w;
-                    }
-                    else
-                    {
-                        rotAcc = Quaternion.Slerp(rotAcc, r, k);
-                        rotWAcc = newRotW;
-                    }
-                }
-
-                Vector2 speed = ComputeSpeedVector2(tr, fromPos, toPos, sp, b);
-                speedAcc += speed * w;
-                anySpeed = true;
-
-                sumW += w;
             }
 
-            _locomotionTest.SetTimelineDriven(sumW > eps);
+            _locomotionTest.SetTimelineDriven(hasActive);
 
-            if (sumW <= eps)
+            if (!hasActive || b == null || b.To == null)
             {
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
@@ -196,111 +155,80 @@ namespace AlSo
                         tr.position = _basePos;
                         tr.rotation = _baseRot;
                     }
+
+                    loco.ClearActionPreview();
+                    loco.SetAbsoluteTime(trackTime);
+                    loco.UpdateLocomotion(Vector2.zero, 0f);
+                    loco.EvaluateGraph(0f);
+                    return;
                 }
 #endif
-
-                var loco0 = _locomotionTest.Locomotion;
-                if (loco0 != null)
-                {
-                    loco0.SetAbsoluteTime(trackTime);
-                    loco0.UpdateLocomotion(Vector2.zero);
-
-#if UNITY_EDITOR
-                    if (!Application.isPlaying)
-                    {
-                        loco0.EvaluateGraph(0f);
-                    }
-#endif
-                }
-
-#if UNITY_EDITOR
-                if (!Application.isPlaying)
-                {
-                    _prevTrackTime = trackTime;
-                    _hasPrevTime = true;
-                }
-#endif
+                loco.SetAbsoluteTime(trackTime);
+                _locomotionTest.debugSpeed = Vector2.zero;
+                loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
                 return;
             }
 
-            float inv = 1f / sumW;
+            double dur = sp.GetDuration();
+            double t = sp.GetTime();
 
-            if (anyPos)
+            float nt = (dur > eps) ? (float)(t / dur) : 1f;
+            nt = Mathf.Clamp01(nt);
+
+            if (b.Curve != null && b.Curve.length > 0)
             {
-                float baseW = Mathf.Clamp01(1f - sumW);
-                Vector3 finalPos = (posAcc * inv) * sumW + _basePos * baseW;
-                tr.position = finalPos;
+                nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
             }
 
-            if (anyRot)
+            Vector3 fromPos = b.From != null ? b.From.position : _basePos;
+            Quaternion fromRot = b.From != null ? b.From.rotation : _baseRot;
+
+            Vector3 toPos = b.To.position;
+            Quaternion toRot = b.To.rotation;
+
+            Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
+            Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
+
+            if (b.DrivePosition)
             {
-                Quaternion finalRot = Quaternion.Slerp(_baseRot, rotAcc, sumW);
-                tr.rotation = finalRot;
+                tr.position = Vector3.Lerp(_basePos, p, activeW);
             }
 
-            Vector2 finalSpeed = anySpeed ? (speedAcc * inv) : Vector2.zero;
+            if (b.DriveRotation)
+            {
+                tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
+            }
+
+            Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, sp, b);
+
+            loco.ClearActionPreview();
+
+            // Фаза локомоции привязана к пройденной дистанции (детерминировано для скраба).
+            Vector3 planarDelta = toPos - fromPos;
+            planarDelta.y = 0f;
+
+            float totalDist = planarDelta.magnitude;
+            float distTraveled = totalDist * nt;
+
+            float fullSpeed = Mathf.Max(0.0001f, b.FullSpeedMps);
+            float speedMul = Mathf.Max(0.0001f, b.SpeedMultiplier);
+
+            double locomotionTime = (distTraveled / fullSpeed) * speedMul;
+            loco.SetAbsoluteTime(locomotionTime);
+
+            _locomotionTest.debugSpeed = finalSpeed;
 
 #if UNITY_EDITOR
             if (!Application.isPlaying)
             {
-                if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
-                {
-                    finalSpeed = Vector2.zero;
-                }
-
-                _prevTrackTime = trackTime;
-                _hasPrevTime = true;
+                // В Edit Mode dt=0, и Animator.speed=0 — поза меняется только при изменении времени Timeline.
+                loco.UpdateLocomotion(finalSpeed, 0f);
+                loco.EvaluateGraph(0f);
+                return;
             }
 #endif
 
-            var loco = _locomotionTest.Locomotion;
-            if (loco != null)
-            {
-                loco.SetAbsoluteTime(trackTime);
-                loco.UpdateLocomotion(finalSpeed);
-
-#if UNITY_EDITOR
-                if (!Application.isPlaying)
-                {
-                    loco.EvaluateGraph(0f);
-                }
-#endif
-            }
-        }
-
-        private bool TryResolveTarget()
-        {
-            if (_targetTransform != null && _locomotionTest != null)
-            {
-                return true;
-            }
-
-            if (Director == null || SelfTrack == null)
-            {
-                return false;
-            }
-
-            // ВАЖНО: берём binding прямо с трека
-            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
-            if (_targetTransform == null)
-            {
-                return false;
-            }
-
-            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
-            if (_locomotionTest == null)
-            {
-                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
-            }
-
-            if (_locomotionTest == null)
-            {
-                return false;
-            }
-
-            _cached = false;
-            _hasPrevTime = false;
-            return true;
+            loco.UpdateLocomotion(finalSpeed, info.deltaTime);
         }
 
         private static Vector2 ComputeSpeedVector2(
@@ -320,11 +248,7 @@ namespace AlSo
                 return Vector2.zero;
             }
 
-            float h = Mathf.Min(1f / 60f, dur * 0.1f);
-            if (h <= eps)
-            {
-                h = 1f / 60f;
-            }
+            float h = Mathf.Clamp(dur * 0.01f, 0.001f, 0.05f);
 
             float t0 = Mathf.Clamp(t - h, 0f, dur);
             float t1 = Mathf.Clamp(t + h, 0f, dur);
@@ -358,10 +282,111 @@ namespace AlSo
             return vLocal.normalized * (mag01 * b.SpeedMultiplier);
         }
 
+        private bool TryResolveTarget()
+        {
+            if (_targetTransform != null && _locomotionTest != null)
+            {
+                return true;
+            }
+
+            if (Director == null || SelfTrack == null)
+            {
+                return false;
+            }
+
+            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
+            if (_targetTransform == null)
+            {
+                return false;
+            }
+
+            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
+            if (_locomotionTest == null)
+            {
+                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
+            }
+
+            if (_locomotionTest == null)
+            {
+                return false;
+            }
+
+#if UNITY_EDITOR
+            if (_animator == null)
+            {
+                _animator = _targetTransform.GetComponent<Animator>();
+                if (_animator == null)
+                {
+                    _animator = _targetTransform.GetComponentInParent<Animator>();
+                }
+            }
+#endif
+
+            _cached = false;
+            return true;
+        }
+
+#if UNITY_EDITOR
+        private void SetAnimatorFrozenInEditMode(bool freeze)
+        {
+            if (Application.isPlaying)
+            {
+                RestoreAnimatorSpeed();
+                return;
+            }
+
+            if (_animator == null)
+            {
+                return;
+            }
+
+            if (!_cachedAnimatorSpeedValid)
+            {
+                _cachedAnimatorSpeed = _animator.speed;
+                _cachedAnimatorSpeedValid = true;
+            }
+
+            if (freeze)
+            {
+                if (Mathf.Abs(_animator.speed) > 1e-6f)
+                {
+                    _animator.speed = 0f;
+                }
+            }
+            else
+            {
+                RestoreAnimatorSpeed();
+            }
+        }
+
+        private void RestoreAnimatorSpeed()
+        {
+            if (_animator == null)
+            {
+                return;
+            }
+
+            if (!_cachedAnimatorSpeedValid)
+            {
+                return;
+            }
+
+            if (Mathf.Abs(_animator.speed - _cachedAnimatorSpeed) > 1e-6f)
+            {
+                _animator.speed = _cachedAnimatorSpeed;
+            }
+        }
+#endif
+
         public override void OnPlayableDestroy(Playable playable)
         {
+#if UNITY_EDITOR
+            RestoreAnimatorSpeed();
+            _animator = null;
+            _cachedAnimatorSpeedValid = false;
+#endif
+
             _cached = false;
-            _hasPrevTime = false;
             _targetTransform = null;
             _locomotionTest = null;
         }
