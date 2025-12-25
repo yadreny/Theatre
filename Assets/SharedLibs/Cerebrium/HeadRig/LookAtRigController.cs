@@ -2,6 +2,10 @@ using System;
 using Sirenix.OdinInspector;
 using UnityEngine;
 
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
 namespace AlSo
 {
 #if UNITY_EDITOR
@@ -26,7 +30,8 @@ namespace AlSo
         [Min(0f)]
         public float yawUndefinedPlanarEps = 0.05f;
 
-        [Header("Blend (per frame)")]
+        [Header("Blend (time-based)")]
+        [Tooltip("Смысл как у per-frame lerp на 60fps, но реально считается от dt:\nalpha = 1 - (1 - lerpFactor01)^(dt*60).")]
         [PropertyRange(0f, 1f)]
         public float lerpFactor01 = 0.15f;
 
@@ -57,6 +62,18 @@ namespace AlSo
 
         private bool _hasStableYaw;
         private float _stableYawDeg;
+
+        // ===== External time (Timeline) =====
+        private bool _externalTimeValid;
+        private double _externalPrevTime;
+        private float _externalDt;
+        private bool _externalDtProvidedThisFrame;
+
+        // ===== dt fallback (Editor) =====
+#if UNITY_EDITOR
+        private bool _editorTimeValid;
+        private double _editorPrevTime;
+#endif
 
 #if UNITY_EDITOR
         private double _nextLogTimeEditor;
@@ -99,7 +116,11 @@ namespace AlSo
                 _targetDeltaWorld[i] = Quaternion.identity;
             }
 
+            _externalTimeValid = false;
+            _externalDtProvidedThisFrame = false;
+
 #if UNITY_EDITOR
+            _editorTimeValid = false;
             _nextLogTimeEditor = 0.0;
 #else
             _nextLogTimePlay = 0f;
@@ -109,7 +130,37 @@ namespace AlSo
         private void LateUpdate()
         {
             EnsureSetup();
-            ApplyLook_DeltaPerFrameLerp();
+            ApplyLook_TimeBased();
+        }
+
+        /// <summary>
+        /// Вызывай из Timeline (в ProcessFrame) перед Apply.
+        /// Тогда dt берётся строго из trackTime, и поведение в Play/Scrub становится максимально одинаковым.
+        /// </summary>
+        public void SetExternalTimeSeconds(double absoluteTimeSeconds)
+        {
+            if (!_externalTimeValid)
+            {
+                _externalTimeValid = true;
+                _externalPrevTime = absoluteTimeSeconds;
+                _externalDt = 0f;
+            }
+            else
+            {
+                double dt = absoluteTimeSeconds - _externalPrevTime;
+                _externalPrevTime = absoluteTimeSeconds;
+
+                if (dt < 0.0)
+                {
+                    // при перемотке назад не "догоняем" — просто считаем dt=0
+                    dt = 0.0;
+                }
+
+                if (dt > 0.25) dt = 0.25; // разумный clamp от резких прыжков
+                _externalDt = (float)dt;
+            }
+
+            _externalDtProvidedThisFrame = true;
         }
 
         private void EnsureSetup()
@@ -174,7 +225,7 @@ namespace AlSo
             }
         }
 
-        private void ApplyLook_DeltaPerFrameLerp()
+        private void ApplyLook_TimeBased()
         {
             if (settings == null || settings.bones == null || settings.bones.Length == 0)
             {
@@ -191,22 +242,22 @@ namespace AlSo
             bool hasTarget = lookTarget != null;
             BuildTargetDeltaWorld(hasTarget);
 
-            float a = Mathf.Clamp01(lerpFactor01);
+            float dt = ResolveDt();
+            float alpha = ComputeAlpha(dt, lerpFactor01);
 
-            // 1) Сначала лерпаем ДЕЛЬТЫ (они живут между кадрами и не сбрасываются Animator'ом)
+            // 1) лерпим ДЕЛЬТЫ во времени
             for (int i = 0; i < n; i++)
             {
-                _currentDeltaWorld[i] = Quaternion.Slerp(_currentDeltaWorld[i], _targetDeltaWorld[i], a);
+                _currentDeltaWorld[i] = Quaternion.Slerp(_currentDeltaWorld[i], _targetDeltaWorld[i], alpha);
 
-                // микро-снап, чтобы “доползало” без вечного хвоста
-                float d = Mathf.Abs(Quaternion.Dot(_currentDeltaWorld[i], _targetDeltaWorld[i]));
-                if (d > 0.9999995f)
+                float dot = Mathf.Abs(Quaternion.Dot(_currentDeltaWorld[i], _targetDeltaWorld[i]));
+                if (dot > 0.9999995f)
                 {
                     _currentDeltaWorld[i] = _targetDeltaWorld[i];
                 }
             }
 
-            // 2) Применяем поверх анимации: final = delta * animPose
+            // 2) применяем поверх позы анимации (Animator может менять кости каждый кадр)
             for (int i = 0; i < n; i++)
             {
                 Transform bt = _boneTransforms[i];
@@ -218,6 +269,64 @@ namespace AlSo
                 Quaternion animWorld = bt.rotation;
                 bt.rotation = _currentDeltaWorld[i] * animWorld;
             }
+        }
+
+        private float ResolveDt()
+        {
+            if (_externalDtProvidedThisFrame)
+            {
+                _externalDtProvidedThisFrame = false;
+                return _externalDt;
+            }
+
+            if (Application.isPlaying)
+            {
+                float dt = Time.unscaledDeltaTime;
+                if (dt < 0f) dt = 0f;
+                if (dt > 0.25f) dt = 0.25f;
+                return dt;
+            }
+
+#if UNITY_EDITOR
+            double now = EditorApplication.timeSinceStartup;
+
+            if (!_editorTimeValid)
+            {
+                _editorTimeValid = true;
+                _editorPrevTime = now;
+                return 0f;
+            }
+
+            double d = now - _editorPrevTime;
+            _editorPrevTime = now;
+
+            if (d < 0.0) d = 0.0;
+            if (d > 0.25) d = 0.25;
+
+            return (float)d;
+#else
+            return 0f;
+#endif
+        }
+
+        private static float ComputeAlpha(float dt, float perFrameFactorAt60Fps)
+        {
+            float f = Mathf.Clamp01(perFrameFactorAt60Fps);
+
+            if (f >= 0.999999f)
+            {
+                return 1f;
+            }
+
+            if (f <= 0.000001f || dt <= 0f)
+            {
+                return 0f;
+            }
+
+            // делаем эквивалент "пер-кадрового" лерпа, но во времени:
+            // alpha = 1 - (1 - f)^(dt * 60)
+            float a = 1f - Mathf.Pow(1f - f, dt * 60f);
+            return Mathf.Clamp01(a);
         }
 
         private void BuildTargetDeltaWorld(bool targetActive)
@@ -236,7 +345,7 @@ namespace AlSo
 
             if (!targetActive)
             {
-                // цели нет -> хотим вернуться в анимацию (дельта к identity)
+                // нет цели -> хотим вернуться в анимацию (identity delta)
                 return;
             }
 
@@ -304,7 +413,7 @@ namespace AlSo
                 planarForPitch = eps;
             }
 
-            // знак такой, чтобы "цель сверху -> pitch положительный (вверх)"
+            // цель сверху -> pitch положительный (вверх)
             float pitchDegRaw = -Mathf.Atan2(dirEyesLocalN.y, Mathf.Max(1e-6f, planarForPitch)) * Mathf.Rad2Deg;
 
             Caps caps = ComputeCapsAll();
@@ -336,7 +445,7 @@ namespace AlSo
 
             Vector3 bodyUpW = bodyTransform.up;
 
-            // Pitch axis строим после yaw (чтобы не было бокового наклона при повороте в сторону)
+            // pitch axis после yaw
             Quaternion yawRot = Quaternion.AngleAxis(yawDeg, bodyUpW);
 
             Vector3 rightAxis = yawRot * bodyTransform.right;
@@ -349,7 +458,6 @@ namespace AlSo
                 rightAxis.Normalize();
             }
 
-            // первичное распределение по весам
             for (int i = 0; i < n; i++)
             {
                 float s = _tmpWeights[i] / wSum;
@@ -357,7 +465,6 @@ namespace AlSo
                 _tmpPitchApplied[i] = pitchDeg * s;
             }
 
-            // clamp по лимитам кости
             for (int i = 0; i < n; i++)
             {
                 float hMax = Mathf.Max(0f, settings.bones[i].horizontalMaxDeg);
@@ -369,11 +476,9 @@ namespace AlSo
                 _tmpPitchApplied[i] = Mathf.Clamp(_tmpPitchApplied[i], vMin, vMax);
             }
 
-            // добиваем остаток, если упёрлись в лимиты
             RedistributeYaw(yawDeg);
             RedistributePitch(pitchDeg);
 
-            // собираем дельты
             for (int i = 0; i < n; i++)
             {
                 float w = Mathf.Max(0f, settings.bones[i].weight);
@@ -615,7 +720,7 @@ namespace AlSo
         private bool CanLogNow()
         {
 #if UNITY_EDITOR
-            double now = UnityEditor.EditorApplication.timeSinceStartup;
+            double now = EditorApplication.timeSinceStartup;
             if (now < _nextLogTimeEditor) return false;
 
             _nextLogTimeEditor = now + Math.Max(0.0, logCooldownSeconds);
