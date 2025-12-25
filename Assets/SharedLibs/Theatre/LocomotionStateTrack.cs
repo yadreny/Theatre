@@ -5,6 +5,7 @@ using UnityEngine.Timeline;
 namespace AlSo
 {
     [TrackColor(0.65f, 0.65f, 0.65f)]
+    [TrackBindingType(typeof(Transform))] // <-- ВАЖНО: binding актёра прямо на этом треке
     [TrackClipType(typeof(LocomotionRunToClip))]
     [TrackClipType(typeof(LocomotionStandAtClip))]
     [TrackClipType(typeof(LocomotionActionClip))]

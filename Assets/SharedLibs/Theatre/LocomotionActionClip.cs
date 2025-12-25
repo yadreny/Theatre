@@ -189,13 +189,8 @@ namespace AlSo
                 return false;
             }
 
-            LocomotionActorBindingTrack bindTrack = FindActorBindingTrack(SelfTrack);
-            if (bindTrack == null)
-            {
-                return false;
-            }
-
-            _targetTransform = Director.GetGenericBinding(bindTrack) as Transform;
+            // ВАЖНО: берём binding прямо с трека
+            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
             if (_targetTransform == null)
             {
                 return false;
@@ -208,31 +203,6 @@ namespace AlSo
             }
 
             return _locomotionTest != null;
-        }
-
-        private static LocomotionActorBindingTrack FindActorBindingTrack(TrackAsset anyTrackInGroup)
-        {
-            TrackAsset parent = anyTrackInGroup != null ? anyTrackInGroup.parent as TrackAsset : null;
-
-            while (parent != null && parent is not GroupTrack)
-            {
-                parent = parent.parent as TrackAsset;
-            }
-
-            if (parent == null)
-            {
-                return null;
-            }
-
-            foreach (TrackAsset child in parent.GetChildTracks())
-            {
-                if (child is LocomotionActorBindingTrack bt)
-                {
-                    return bt;
-                }
-            }
-
-            return null;
         }
 
         public override void OnPlayableDestroy(Playable playable)

@@ -5,7 +5,6 @@ using UnityEngine.Timeline;
 
 namespace AlSo
 {
-
     [Serializable]
     public class LocomotionStandAtClip : PlayableAsset, ITimelineClipAsset
     {
@@ -348,13 +347,8 @@ namespace AlSo
                 return false;
             }
 
-            LocomotionActorBindingTrack bindTrack = FindActorBindingTrack(SelfTrack);
-            if (bindTrack == null)
-            {
-                return false;
-            }
-
-            _targetTransform = Director.GetGenericBinding(bindTrack) as Transform;
+            // ВАЖНО: актёра берём прямо с binding этого трека
+            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
             if (_targetTransform == null)
             {
                 return false;
@@ -374,31 +368,6 @@ namespace AlSo
             _cached = false;
             _hasPrevTime = false;
             return true;
-        }
-
-        private static LocomotionActorBindingTrack FindActorBindingTrack(TrackAsset anyTrackInGroup)
-        {
-            TrackAsset parent = anyTrackInGroup != null ? anyTrackInGroup.parent as TrackAsset : null;
-
-            while (parent != null && parent is not GroupTrack)
-            {
-                parent = parent.parent as TrackAsset;
-            }
-
-            if (parent == null)
-            {
-                return null;
-            }
-
-            foreach (TrackAsset child in parent.GetChildTracks())
-            {
-                if (child is LocomotionActorBindingTrack bt)
-                {
-                    return bt;
-                }
-            }
-
-            return null;
         }
 
         private static Vector2 ComputeSpeedVector2(
