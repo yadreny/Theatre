@@ -64,6 +64,10 @@ namespace AlSo
         private bool _hasPrevTime;
         private double _prevTrackTime;
 
+        // === Плавный разгон/торможение (константы) ===
+        private const float AccelNorm = 0.15f;
+        private const float DecelNorm = 0.15f;
+
         private struct RunToRefs
         {
             public Transform From;
@@ -208,13 +212,10 @@ namespace AlSo
                 double dur = runP.GetDuration();
                 double t = runP.GetTime();
 
-                float nt = (dur > eps) ? (float)(t / dur) : 1f;
-                nt = Mathf.Clamp01(nt);
+                float ntTime = (dur > eps) ? (float)(t / dur) : 1f;
+                ntTime = Mathf.Clamp01(ntTime);
 
-                if (runB.Curve != null && runB.Curve.length > 0)
-                {
-                    nt = Mathf.Clamp01(runB.Curve.Evaluate(nt));
-                }
+                float nt = EvaluateMotionNt(runB, ntTime);
 
                 Vector3 fromPos = refs.From != null ? refs.From.position : _basePos;
                 Quaternion fromRot = refs.From != null ? refs.From.rotation : _baseRot;
@@ -236,13 +237,12 @@ namespace AlSo
                     tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
                 }
 
-                // Скорость для выбора клипов (тоже детерминированно: численная производная по времени клипа)
-                Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, runP, runB);
+                // Скорость для выбора клипов (численная производная по времени клипа, с тем же easing)
+                Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, (float)dur, (float)t, runB);
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
-                    // при скрабе одно и то же время может вызываться несколько раз
                     if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
                     {
                         finalSpeed = Vector2.zero;
@@ -253,9 +253,12 @@ namespace AlSo
                 }
 #endif
 
+                // вес клипа тоже гасит скорость
+                finalSpeed *= activeW;
+
                 loco.ClearActionPreview();
 
-                // Синхронизируем фазу локомоции по ПРОЙДЕННОЙ ДИСТАНЦИИ, а не по времени таймлайна.
+                // Фаза локомоции по пройденной дистанции (с easing)
                 Vector3 planarDelta = toPos - fromPos;
                 planarDelta.y = 0f;
 
@@ -284,7 +287,6 @@ namespace AlSo
             // 4) StandAt (Target НЕ обязателен!)
             if (activeType == typeof(LocomotionStandAtBehaviour))
             {
-                // Трансформ: если Target есть — можем к нему тянуться, если нет — просто не трогаем позицию/рот.
                 if (standB != null && standB.Target != null)
                 {
                     if (standB.DrivePosition)
@@ -298,7 +300,6 @@ namespace AlSo
                     }
                 }
 
-                // КЛЮЧЕВОЕ: при StandAt всегда обновляем локомоцию, иначе залипают веса от прошлого клипа.
                 loco.ClearActionPreview();
                 loco.SetAbsoluteTime(trackTime);
 
@@ -367,11 +368,72 @@ namespace AlSo
             }
         }
 
+        private static float EvaluateMotionNt(LocomotionRunToBehaviour b, float ntTime01)
+        {
+            ntTime01 = Mathf.Clamp01(ntTime01);
+
+            float nt = ApplyAccelDecelProgress(ntTime01);
+
+            if (b.Curve != null && b.Curve.length > 0)
+            {
+                nt = Mathf.Clamp01(b.Curve.Evaluate(nt));
+            }
+
+            return Mathf.Clamp01(nt);
+        }
+
+        private static float ApplyAccelDecelProgress(float t01)
+        {
+            t01 = Mathf.Clamp01(t01);
+
+            float a = Mathf.Clamp01(AccelNorm);
+            float d = Mathf.Clamp01(DecelNorm);
+
+            if (a + d >= 0.999f)
+            {
+                float k = 0.999f / Mathf.Max(1e-6f, (a + d));
+                a *= k;
+                d *= k;
+            }
+
+            float plateauStart = a;
+            float plateauEnd = 1f - d;
+
+            float totalArea = 1f - 0.5f * (a + d);
+            if (totalArea <= 1e-6f)
+            {
+                return t01;
+            }
+
+            float area;
+
+            if (t01 <= plateauStart)
+            {
+                if (a <= 1e-6f) return 0f;
+                area = 0.5f * (t01 * t01) / a;
+            }
+            else if (t01 <= plateauEnd)
+            {
+                area = 0.5f * a + (t01 - a);
+            }
+            else
+            {
+                float u = t01 - plateauEnd;
+                if (d <= 1e-6f) return 1f;
+
+                float areaToPlateauEnd = 0.5f * a + (plateauEnd - a);
+                float areaDecel = u - 0.5f * (u * u) / d;
+
+                area = areaToPlateauEnd + areaDecel;
+            }
+
+            return Mathf.Clamp01(area / totalArea);
+        }
+
         private RunToRefs ResolveRunToRefs(Playable playable, LocomotionRunToBehaviour b)
         {
             RunToRefs r = default;
 
-            // Фолбэки (если таблица недоступна)
             r.From = b.FromFallback;
             r.To = b.ToFallback;
 
@@ -425,33 +487,27 @@ namespace AlSo
             Transform character,
             Vector3 fromPos,
             Vector3 toPos,
-            ScriptPlayable<LocomotionRunToBehaviour> clipPlayable,
+            float clipDuration,
+            float clipTime,
             LocomotionRunToBehaviour b)
         {
             const float eps = 1e-6f;
 
-            float dur = (float)clipPlayable.GetDuration();
-            float t = (float)clipPlayable.GetTime();
-
-            if (dur <= eps)
+            if (clipDuration <= eps)
             {
                 return Vector2.zero;
             }
 
-            // малый шаг для численной производной по времени клипа
-            float h = Mathf.Clamp(dur * 0.01f, 0.001f, 0.05f);
+            float h = Mathf.Clamp(clipDuration * 0.01f, 0.001f, 0.05f);
 
-            float t0 = Mathf.Clamp(t - h, 0f, dur);
-            float t1 = Mathf.Clamp(t + h, 0f, dur);
+            float t0 = Mathf.Clamp(clipTime - h, 0f, clipDuration);
+            float t1 = Mathf.Clamp(clipTime + h, 0f, clipDuration);
 
-            float nt0 = t0 / dur;
-            float nt1 = t1 / dur;
+            float ntTime0 = t0 / clipDuration;
+            float ntTime1 = t1 / clipDuration;
 
-            if (b.Curve != null && b.Curve.length > 0)
-            {
-                nt0 = Mathf.Clamp01(b.Curve.Evaluate(nt0));
-                nt1 = Mathf.Clamp01(b.Curve.Evaluate(nt1));
-            }
+            float nt0 = EvaluateMotionNt(b, ntTime0);
+            float nt1 = EvaluateMotionNt(b, ntTime1);
 
             Vector3 p0 = Vector3.LerpUnclamped(fromPos, toPos, nt0);
             Vector3 p1 = Vector3.LerpUnclamped(fromPos, toPos, nt1);
