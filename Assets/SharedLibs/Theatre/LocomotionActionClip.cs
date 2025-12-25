@@ -5,22 +5,6 @@ using UnityEngine.Timeline;
 
 namespace AlSo
 {
-    [TrackColor(0.95f, 0.55f, 0.35f)]
-    [TrackClipType(typeof(LocomotionActionClip))]
-    public class LocomotionActionTrack : TrackAsset
-    {
-        public override Playable CreateTrackMixer(PlayableGraph graph, GameObject go, int inputCount)
-        {
-            var playable = ScriptPlayable<LocomotionActionMixerBehaviour>.Create(graph, inputCount);
-            var b = playable.GetBehaviour();
-
-            b.Director = go != null ? go.GetComponent<PlayableDirector>() : null;
-            b.SelfTrack = this;
-
-            return playable;
-        }
-    }
-
     [Serializable]
     public class LocomotionActionClip : PlayableAsset, ITimelineClipAsset
     {

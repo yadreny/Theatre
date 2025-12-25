@@ -5,21 +5,21 @@ using UnityEngine.Timeline;
 
 namespace AlSo
 {
-    [TrackColor(0.35f, 0.75f, 0.95f)]
-    [TrackClipType(typeof(LocomotionRunToClip))]
-    public class LocomotionRunToTrack : TrackAsset
-    {
-        public override Playable CreateTrackMixer(PlayableGraph graph, GameObject go, int inputCount)
-        {
-            var playable = ScriptPlayable<LocomotionRunToMixerBehaviour>.Create(graph, inputCount);
-            var b = playable.GetBehaviour();
+    //[TrackColor(0.35f, 0.75f, 0.95f)]
+    //[TrackClipType(typeof(LocomotionRunToClip))]
+    //public class LocomotionRunToTrack : TrackAsset
+    //{
+    //    public override Playable CreateTrackMixer(PlayableGraph graph, GameObject go, int inputCount)
+    //    {
+    //        var playable = ScriptPlayable<LocomotionRunToMixerBehaviour>.Create(graph, inputCount);
+    //        var b = playable.GetBehaviour();
 
-            b.Director = go != null ? go.GetComponent<PlayableDirector>() : null;
-            b.SelfTrack = this;
+    //        b.Director = go != null ? go.GetComponent<PlayableDirector>() : null;
+    //        b.SelfTrack = this;
 
-            return playable;
-        }
-    }
+    //        return playable;
+    //    }
+    //}
 
     [Serializable]
     public class LocomotionRunToClip : PlayableAsset, ITimelineClipAsset
