@@ -8,7 +8,7 @@ namespace AlSo
     [Serializable]
     public class LocomotionStandAtClip : PlayableAsset, ITimelineClipAsset
     {
-        [Header("Target")]
+        [Header("Target (optional)")]
         public ExposedReference<Transform> target;
 
         [Header("Drive transform")]
@@ -19,7 +19,6 @@ namespace AlSo
         [Tooltip("Если true — при активном клипе принудительно держим скорость 0.")]
         public bool setSpeedZero = true;
 
-        // Можно оставить Blending, но трек упадёт при overlap (мы этого хотим).
         public ClipCaps clipCaps => ClipCaps.Blending | ClipCaps.ClipIn;
 
         public override Playable CreatePlayable(PlayableGraph graph, GameObject owner)
@@ -48,7 +47,7 @@ namespace AlSo
         public bool SetSpeedZero;
     }
 
-    // -------------------- MIXER (exclusive) --------------------
+    // ====================== STATE TRACK MIXER (exclusive by max weight) ======================
 
     public class LocomotionStateMixerBehaviour : PlayableBehaviour
     {
@@ -91,11 +90,9 @@ namespace AlSo
             const float eps = 1e-6f;
             double trackTime = playable.GetTime();
 
-            // 1) Найти единственный активный input (strict).
+            // 1) Берём активный input по МАКС. весу (так стабильнее с easing/blending).
             bool hasActive = false;
             float activeW = 0f;
-
-            Playable activeInput = default;
             Type activeType = null;
 
             ScriptPlayable<LocomotionRunToBehaviour> runP = default;
@@ -130,36 +127,34 @@ namespace AlSo
                     continue;
                 }
 
-                if (hasActive)
+                if (!hasActive || w > activeW)
                 {
-                    string msg =
-                        $"[LocomotionStateTrack] Overlapping clips are not allowed on this track. " +
-                        $"Detected multiple active inputs at timeline time={trackTime:0.###}. " +
-                        $"First={activeType?.Name ?? "?"}, Second={pt.Name}.";
+                    hasActive = true;
+                    activeW = w;
+                    activeType = pt;
 
-                    UnityEngine.Debug.LogError(msg);
-                    throw new InvalidOperationException(msg);
-                }
+                    runP = default;
+                    runB = null;
+                    standP = default;
+                    standB = null;
+                    actionP = default;
+                    actionB = null;
 
-                hasActive = true;
-                activeW = w;
-                activeInput = input;
-                activeType = pt;
-
-                if (pt == typeof(LocomotionRunToBehaviour))
-                {
-                    runP = (ScriptPlayable<LocomotionRunToBehaviour>)input;
-                    runB = runP.GetBehaviour();
-                }
-                else if (pt == typeof(LocomotionStandAtBehaviour))
-                {
-                    standP = (ScriptPlayable<LocomotionStandAtBehaviour>)input;
-                    standB = standP.GetBehaviour();
-                }
-                else // action
-                {
-                    actionP = (ScriptPlayable<LocomotionActionBehaviour>)input;
-                    actionB = actionP.GetBehaviour();
+                    if (pt == typeof(LocomotionRunToBehaviour))
+                    {
+                        runP = (ScriptPlayable<LocomotionRunToBehaviour>)input;
+                        runB = runP.GetBehaviour();
+                    }
+                    else if (pt == typeof(LocomotionStandAtBehaviour))
+                    {
+                        standP = (ScriptPlayable<LocomotionStandAtBehaviour>)input;
+                        standB = standP.GetBehaviour();
+                    }
+                    else
+                    {
+                        actionP = (ScriptPlayable<LocomotionActionBehaviour>)input;
+                        actionB = actionP.GetBehaviour();
+                    }
                 }
             }
 
@@ -190,7 +185,7 @@ namespace AlSo
                 return;
             }
 
-            // 3) Активен один клип — выполняем его логику.
+            // 3) RunTo
             if (activeType == typeof(LocomotionRunToBehaviour))
             {
                 if (runB == null || runB.To == null)
@@ -215,28 +210,27 @@ namespace AlSo
                 Vector3 toPos = runB.To.position;
                 Quaternion toRot = runB.To.rotation;
 
-                Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
-                Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
-
-                // Вес клипа учитываем как fade к base
                 if (runB.DrivePosition)
                 {
+                    Vector3 p = Vector3.LerpUnclamped(fromPos, toPos, nt);
                     tr.position = Vector3.Lerp(_basePos, p, activeW);
                 }
 
                 if (runB.DriveRotation)
                 {
+                    Quaternion r = Quaternion.SlerpUnclamped(fromRot, toRot, nt);
                     tr.rotation = Quaternion.Slerp(_baseRot, r, activeW);
                 }
 
-                Vector2 finalSpeed = ComputeSpeedVector2(tr, fromPos, toPos, runP, runB);
+                Vector2 vLocal = ComputeSpeedVector2(tr, fromPos, toPos, runP, runB);
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
+                    // при скрабе одно и то же время может вызываться несколько раз
                     if (_hasPrevTime && Math.Abs(trackTime - _prevTrackTime) < 1e-9)
                     {
-                        finalSpeed = Vector2.zero;
+                        vLocal = Vector2.zero;
                     }
 
                     _prevTrackTime = trackTime;
@@ -244,65 +238,77 @@ namespace AlSo
                 }
 #endif
 
+                loco.ClearActionPreview();
                 loco.SetAbsoluteTime(trackTime);
-                _locomotionTest.debugSpeed = finalSpeed;
-                loco.UpdateLocomotion(finalSpeed, info.deltaTime);
+                _locomotionTest.debugSpeed = vLocal;
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
-                    loco.ClearActionPreview();
+                    loco.UpdateLocomotion(vLocal, 0f);
                     loco.EvaluateGraph(0f);
-                }
-#endif
-                return;
-            }
-
-            if (activeType == typeof(LocomotionStandAtBehaviour))
-            {
-                if (standB == null || standB.Target == null)
-                {
                     return;
                 }
+#endif
 
-                if (standB.DrivePosition)
+                loco.UpdateLocomotion(vLocal, info.deltaTime);
+                return;
+            }
+
+            // 4) StandAt (Target НЕ обязателен!)
+            if (activeType == typeof(LocomotionStandAtBehaviour))
+            {
+                // Трансформ: если Target есть — можем к нему тянуться, если нет — просто не трогаем позицию/рот.
+                if (standB != null && standB.Target != null)
                 {
-                    tr.position = Vector3.Lerp(_basePos, standB.Target.position, activeW);
+                    if (standB.DrivePosition)
+                    {
+                        tr.position = Vector3.Lerp(_basePos, standB.Target.position, activeW);
+                    }
+
+                    if (standB.DriveRotation)
+                    {
+                        tr.rotation = Quaternion.Slerp(_baseRot, standB.Target.rotation, activeW);
+                    }
                 }
 
-                if (standB.DriveRotation)
-                {
-                    tr.rotation = Quaternion.Slerp(_baseRot, standB.Target.rotation, activeW);
-                }
-
+                // КЛЮЧЕВОЕ: при StandAt всегда обновляем локомоцию, иначе залипают веса от прошлого клипа.
+                loco.ClearActionPreview();
                 loco.SetAbsoluteTime(trackTime);
 
-                if (standB.SetSpeedZero)
+                Vector2 standSpeed = Vector2.zero;
+                if (standB != null && !standB.SetSpeedZero)
+                {
+                    standSpeed = _locomotionTest.debugSpeed;
+                }
+                else
                 {
                     _locomotionTest.debugSpeed = Vector2.zero;
-                    loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
                 }
 
 #if UNITY_EDITOR
                 if (!Application.isPlaying)
                 {
-                    loco.ClearActionPreview();
+                    loco.UpdateLocomotion(standSpeed, 0f);
                     loco.EvaluateGraph(0f);
+                    return;
                 }
 #endif
+
+                loco.UpdateLocomotion(standSpeed, info.deltaTime);
                 return;
             }
 
-            // action
+            // 5) Action
             if (actionB == null || actionB.Action == null || actionB.Action.Clip == null)
             {
                 return;
             }
 
+            // Базовую локомоцию для позы/кривых держим (часто нужно, особенно если action с setSpeedZero)
             if (actionB.SetSpeedZero)
             {
                 _locomotionTest.debugSpeed = Vector2.zero;
-                loco.UpdateLocomotion(Vector2.zero, info.deltaTime);
             }
 
             loco.SetAbsoluteTime(trackTime);
@@ -320,7 +326,7 @@ namespace AlSo
 #if UNITY_EDITOR
             if (!Application.isPlaying)
             {
-                loco.UpdateLocomotion(Vector2.zero, 0f);
+                loco.UpdateLocomotion(_locomotionTest.debugSpeed, 0f);
                 loco.PreviewAction(actionB.Action, localTimeSeconds, activeW);
                 loco.EvaluateGraph(0f);
                 return;
@@ -333,41 +339,6 @@ namespace AlSo
                 loco.EvaluateGraph(0f);
                 return;
             }
-        }
-
-        private bool TryResolveTarget()
-        {
-            if (_targetTransform != null && _locomotionTest != null)
-            {
-                return true;
-            }
-
-            if (Director == null || SelfTrack == null)
-            {
-                return false;
-            }
-
-            // ВАЖНО: актёра берём прямо с binding этого трека
-            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
-            if (_targetTransform == null)
-            {
-                return false;
-            }
-
-            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
-            if (_locomotionTest == null)
-            {
-                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
-            }
-
-            if (_locomotionTest == null)
-            {
-                return false;
-            }
-
-            _cached = false;
-            _hasPrevTime = false;
-            return true;
         }
 
         private static Vector2 ComputeSpeedVector2(
@@ -387,7 +358,6 @@ namespace AlSo
                 return Vector2.zero;
             }
 
-            // малый шаг для численной производной по времени клипа
             float h = Mathf.Clamp(dur * 0.01f, 0.001f, 0.05f);
 
             float t0 = Mathf.Clamp(t - h, 0f, dur);
@@ -420,6 +390,40 @@ namespace AlSo
             }
 
             return vLocal.normalized * (mag01 * b.SpeedMultiplier);
+        }
+
+        private bool TryResolveTarget()
+        {
+            if (_targetTransform != null && _locomotionTest != null)
+            {
+                return true;
+            }
+
+            if (Director == null || SelfTrack == null)
+            {
+                return false;
+            }
+
+            _targetTransform = Director.GetGenericBinding(SelfTrack) as Transform;
+            if (_targetTransform == null)
+            {
+                return false;
+            }
+
+            _locomotionTest = _targetTransform.GetComponent<LocomotionProfileTest>();
+            if (_locomotionTest == null)
+            {
+                _locomotionTest = _targetTransform.GetComponentInParent<LocomotionProfileTest>();
+            }
+
+            if (_locomotionTest == null)
+            {
+                return false;
+            }
+
+            _cached = false;
+            _hasPrevTime = false;
+            return true;
         }
 
         public override void OnPlayableDestroy(Playable playable)
