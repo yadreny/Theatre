@@ -315,6 +315,9 @@ MonoBehaviour:
   lookTarget: {fileID: 1531313435}
   headPivotUpOffset: 0.08
   yawUndefinedPlanarEps: 0.05
+  blendInSeconds: 0.12
+  blendOutSeconds: 0.18
+  lerpFactor: 1
   drawGizmo: 1
   gizmoLength: 0.75
   logWhenOutOfRange: 1
@@ -624,7 +627,7 @@ Camera:
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 1
-  m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
+  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 1}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -757,7 +760,7 @@ Transform:
   m_GameObject: {fileID: 1531313434}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0.158, y: 1.699, z: 0.361}
+  m_LocalPosition: {x: 0.143, y: 1.699, z: 0.361}
   m_LocalScale: {x: 0.1, y: 0.1, z: 0.1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -936,7 +939,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1590469352}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 73ccded6b48592249b15711640b6ebef, type: 3}
   m_Name: 
@@ -944,9 +947,12 @@ MonoBehaviour:
   animator: {fileID: 1590469353}
   bodyTransform: {fileID: 1590469354}
   settings: {fileID: 11400000, guid: 804513a3ec250534582f1534e7859366, type: 2}
-  lookTarget: {fileID: 1531313435}
+  lookTarget: {fileID: 0}
   headPivotUpOffset: 0.08
   yawUndefinedPlanarEps: 0.05
+  blendInSeconds: 0.12
+  blendOutSeconds: 0.18
+  lerpFactor: 1
   drawGizmo: 1
   gizmoLength: 0.75
   logWhenOutOfRange: 1
